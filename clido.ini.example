@@ -1,0 +1,125 @@
+; clido.ini.example — copy this to your deployment directory and edit
+; This file lives next to the index.php symlink, not in the clido repo itself.
+
+[global]
+
+; Page title (shown in browser tab and sidebar header)
+title         = CliDO
+
+; Optional: URL to favicon and logo image
+; favicon     = /favicon.ico
+; logo        = /logo.png
+
+; Default label for the execute button (can be overridden per item)
+execute_text  = EXECUTE
+
+; Path to simplewebauth/auth.php — absolute or relative to the document root.
+; Omit to disable authentication (local/trusted-network deployments only).
+simplewebauth = /var/www/html/simplewebauth/auth.php
+
+; Maximum seconds a command may run before being killed (0 = unlimited)
+max_runtime   = 0
+
+; Seconds to wait between SIGTERM and SIGKILL when cancelling (0 = SIGKILL immediately)
+sigkill_wait  = 5
+
+; Dark-mode color palette — all values are CSS colors
+; color_bg          = #0d1117
+; color_sidebar     = #161b22
+; color_accent      = #21262d
+; color_border      = #30363d
+; color_text        = #c9d1d9
+; color_text_muted  = #8b949e
+; color_btn         = #238636
+; color_btn_text    = #ffffff
+; color_cancel      = #da3633
+; color_output_bg   = #010409
+; color_output_text = #39d353
+
+
+; ──────────────────────────────────────────────────────────────────────────────
+; Groups provide section headers in the left menu.
+; Items that follow a group appear under that group's header.
+; ──────────────────────────────────────────────────────────────────────────────
+
+[group: System]
+title = System Tools
+
+[item: disk_usage]
+title         = Disk Usage
+description   = Show disk usage for all mounted filesystems
+command       = /bin/df
+ARG1          = -h
+
+[item: uptime]
+title         = Uptime
+description   = System uptime and load averages
+command       = /usr/bin/uptime
+
+[item: process_list]
+title         = Process List
+description   = Show running processes
+command       = /bin/ps
+ARG1          = aux
+
+
+[group: Files]
+title = File Tools
+
+[item: list_dir]
+title         = List Directory
+description   = List the contents of a directory
+command       = /bin/ls
+ARG1          = -lah
+INPUT2        = text
+DESC2         = Directory path
+execute_text  = LIST
+
+[item: find_files]
+title         = Find Files
+description   = Search for files matching a pattern
+command       = /usr/bin/find
+INPUT1        = text
+DESC1         = Search path (e.g. /var/log)
+ARG2          = -name
+INPUT3        = text
+DESC3         = Filename pattern (e.g. *.log)
+ARG4          = -type
+ARG5          = f
+
+
+[group: Network]
+title = Network Tools
+
+[item: ping_host]
+title         = Ping Host
+description   = Ping a hostname or IP address
+command       = /bin/ping
+ARG1          = -c
+ARG2          = 5
+INPUT3        = text
+DESC3         = Hostname or IP
+execute_text  = PING
+
+[item: dns_lookup]
+title         = DNS Lookup
+description   = Resolve a hostname
+command       = /usr/bin/dig
+ARG1          = +short
+INPUT2        = text
+DESC2         = Hostname to resolve
+execute_text  = RESOLVE
+
+
+[group: Reports]
+title = Reports
+
+[item: generate_report]
+title         = Generate Report
+description   = Generate and download the daily report archive
+command       = /usr/local/bin/generate_report.sh
+ARG1          = --output-dir
+ARG2          = .
+SHOWFILES     = true
+execute_text  = GENERATE
+max_runtime   = 300
