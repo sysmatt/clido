@@ -22,6 +22,8 @@ $DEFAULTS = [
     'logo'            => '',
     'execute_text'    => 'EXECUTE',
     'simplewebauth'   => '',
+    'logout_url'      => '',
+    'history_qty'     => 5,
     'max_runtime'     => 0,
     'sigkill_wait'    => 5,
     'color_bg'        => '#0d1117',
@@ -972,6 +974,87 @@ html, body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── History section inside modal ── */
+#modal {
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+#modal-history {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.history-label {
+    font-size: 0.7em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82em;
+}
+
+.history-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 500;
+    padding: 3px 8px 5px 0;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.history-table td {
+    padding: 5px 8px 5px 0;
+    border-bottom: 1px solid var(--accent);
+    color: var(--text);
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+.history-table tr:last-child td { border-bottom: none; }
+
+.history-actions {
+    text-align: right;
+    white-space: nowrap;
+    width: 1%;
+    max-width: none !important;
+}
+
+.hist-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.8em;
+    margin-left: 3px;
+    line-height: 1.4;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.hist-btn:hover { background: var(--accent); color: var(--text); }
+
+.hist-btn.hist-run {
+    color: var(--btn);
+    border-color: var(--btn);
+    font-weight: 600;
+    font-size: 0.72em;
+    letter-spacing: 0.02em;
+}
+.hist-btn.hist-run:hover { background: var(--btn); color: var(--btn-text); border-color: var(--btn); }
+
+.hist-btn.hist-del:hover { background: var(--cancel); color: #fff; border-color: var(--cancel); }
 </style>
 </head>
 <body>
@@ -985,11 +1068,13 @@ html, body {
       <img id="sidebar-logo" src="<?= h($g['logo']) ?>" alt="<?= h($g['title']) ?>">
       <?php endif ?>
       <div id="sidebar-title"><?= h($g['title']) ?></div>
-      <?php if ($authUser): ?>
+      <?php if ($authUser && $g['logout_url']): ?>
       <div id="sidebar-user">
         <?= h($authUser) ?> &mdash;
-        <a href="<?= h(dirname(($g['simplewebauth'] ? $g['simplewebauth'] : 'simplewebauth/auth.php'))) ?>/logout.php">sign out</a>
+        <a href="<?= h($g['logout_url']) ?>">sign out</a>
       </div>
+      <?php elseif ($authUser): ?>
+      <div id="sidebar-user"><?= h($authUser) ?></div>
       <?php endif ?>
     </div>
 
@@ -1056,6 +1141,10 @@ foreach ($cfg['groups'] as $entry) {
     <p class="modal-desc" id="modal-desc"></p>
     <form id="modal-form">
       <div id="modal-fields"></div>
+      <div id="modal-history" style="display:none">
+        <div class="history-label">Previous runs</div>
+        <div id="modal-history-body"></div>
+      </div>
       <div class="modal-actions">
         <button type="button" class="btn-secondary" id="btn-modal-cancel">Cancel</button>
         <button type="submit" class="btn-primary" id="btn-execute">EXECUTE</button>
@@ -1077,30 +1166,124 @@ const ITEMS = <?= js(array_map(function($i) {
     ];
 }, $cfg['items'])) ?>;
 
+const HISTORY_QTY = <?= (int)($g['history_qty']) ?>;
+
 // ── State ──
-let running    = false;
+let running     = false;
 let activeToken = null;
 let activeItem  = null;
 let eventSource = null;
 
 // ── Element refs ──
-const $menu       = document.getElementById('menu');
-const $toolbar    = document.getElementById('toolbar-title');
-const $toolDesc   = document.getElementById('toolbar-desc');
-const $output     = document.getElementById('output');
-const $welcome    = document.getElementById('welcome');
-const $stats      = document.getElementById('stats');
-const $filesSection = document.getElementById('files-section');
-const $fileList   = document.getElementById('file-list');
-const $btnCancel  = document.getElementById('btn-cancel');
-const $btnClean   = document.getElementById('btn-clean');
-const $overlay    = document.getElementById('overlay');
-const $modal      = document.getElementById('modal');
-const $modalTitle = document.getElementById('modal-title');
-const $modalDesc  = document.getElementById('modal-desc');
-const $modalFields = document.getElementById('modal-fields');
-const $btnExec    = document.getElementById('btn-execute');
-const $modalForm  = document.getElementById('modal-form');
+const $menu          = document.getElementById('menu');
+const $toolbar       = document.getElementById('toolbar-title');
+const $toolDesc      = document.getElementById('toolbar-desc');
+const $output        = document.getElementById('output');
+const $welcome       = document.getElementById('welcome');
+const $stats         = document.getElementById('stats');
+const $filesSection  = document.getElementById('files-section');
+const $fileList      = document.getElementById('file-list');
+const $btnCancel     = document.getElementById('btn-cancel');
+const $btnClean      = document.getElementById('btn-clean');
+const $overlay       = document.getElementById('overlay');
+const $modal         = document.getElementById('modal');
+const $modalTitle    = document.getElementById('modal-title');
+const $modalDesc     = document.getElementById('modal-desc');
+const $modalFields   = document.getElementById('modal-fields');
+const $modalHistory  = document.getElementById('modal-history');
+const $modalHistBody = document.getElementById('modal-history-body');
+const $btnExec       = document.getElementById('btn-execute');
+const $modalForm     = document.getElementById('modal-form');
+
+// ── History helpers ──
+function histKey(itemName) { return 'clido:history:' + itemName; }
+
+function loadHistory(itemName) {
+    try { return JSON.parse(localStorage.getItem(histKey(itemName)) || '[]'); }
+    catch { return []; }
+}
+
+function saveHistory(itemName, inputs) {
+    if (Object.values(inputs).every(v => !String(v).trim())) return;
+    let hist = loadHistory(itemName);
+    const sig = JSON.stringify(inputs);
+    hist = hist.filter(e => JSON.stringify(e.inputs) !== sig);
+    hist.unshift({ inputs, ts: Math.floor(Date.now() / 1000) });
+    hist = hist.slice(0, HISTORY_QTY);
+    localStorage.setItem(histKey(itemName), JSON.stringify(hist));
+}
+
+function deleteHistoryEntry(itemName, idx) {
+    const hist = loadHistory(itemName);
+    hist.splice(idx, 1);
+    localStorage.setItem(histKey(itemName), JSON.stringify(hist));
+}
+
+function renderHistory(item) {
+    const hist = loadHistory(item.name);
+    if (!hist.length) {
+        $modalHistory.style.display = 'none';
+        return;
+    }
+
+    const slots = Object.entries(item.inputs || {}).sort((a,b) => Number(a[0]) - Number(b[0]));
+    const execText = escHtml(item.execute_text || 'EXECUTE');
+
+    let html = '<table class="history-table"><thead><tr>';
+    slots.forEach(([n, inp]) => {
+        html += `<th>${escHtml(inp.desc || ('Input ' + n))}</th>`;
+    });
+    html += '<th></th></tr></thead><tbody>';
+
+    hist.forEach((entry, idx) => {
+        html += '<tr>';
+        slots.forEach(([n]) => {
+            const val = entry.inputs['input' + n] || '';
+            html += `<td title="${escHtml(val)}">${escHtml(val)}</td>`;
+        });
+        html += `<td class="history-actions">
+            <button type="button" class="hist-btn hist-run" data-idx="${idx}">${execText}</button>
+            <button type="button" class="hist-btn hist-edit" data-idx="${idx}" title="Pre-fill fields">&#9998;</button>
+            <button type="button" class="hist-btn hist-del"  data-idx="${idx}" title="Remove from history">&times;</button>
+        </td></tr>`;
+    });
+
+    html += '</tbody></table>';
+    $modalHistBody.innerHTML = html;
+    $modalHistory.style.display = 'block';
+
+    // Run button: close modal and execute immediately
+    $modalHistBody.querySelectorAll('.hist-run').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const entry = loadHistory(item.name)[Number(btn.dataset.idx)];
+            if (!entry) return;
+            $overlay.classList.remove('open');
+            startExec(item, entry.inputs);
+        });
+    });
+
+    // Edit button: pre-fill form fields, keep modal open
+    $modalHistBody.querySelectorAll('.hist-edit').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const entry = loadHistory(item.name)[Number(btn.dataset.idx)];
+            if (!entry) return;
+            Object.entries(entry.inputs).forEach(([k, v]) => {
+                const field = $modalFields.querySelector(`[name="${k}"]`);
+                if (field) field.value = v;
+            });
+            const first = $modalFields.querySelector('input');
+            if (first) first.focus();
+        });
+    });
+
+    // Delete button: remove entry and re-render
+    $modalHistBody.querySelectorAll('.hist-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+            deleteHistoryEntry(item.name, Number(btn.dataset.idx));
+            renderHistory(item);
+        });
+    });
+}
 
 // ── Menu click handler ──
 $menu.addEventListener('click', e => {
@@ -1114,7 +1297,6 @@ $menu.addEventListener('click', e => {
 
 function openItem(item) {
     activeItem = item;
-    // Mark active
     document.querySelectorAll('.menu-item').forEach(b => b.classList.remove('active'));
     document.querySelector(`.menu-item[data-item="${CSS.escape(item.name)}"]`)?.classList.add('active');
 
@@ -1124,10 +1306,8 @@ function openItem(item) {
 
     const inputs = Object.entries(item.inputs || {});
     if (inputs.length === 0) {
-        // No inputs — run immediately
         startExec(item, {});
     } else {
-        // Show overlay
         $modalTitle.textContent = item.title;
         $modalDesc.textContent  = item.description || '';
         $btnExec.textContent    = item.execute_text || 'EXECUTE';
@@ -1144,8 +1324,9 @@ function openItem(item) {
             $modalFields.appendChild(row);
         });
 
+        renderHistory(item);
+
         $overlay.classList.add('open');
-        // Focus first input
         const first = $modalFields.querySelector('input');
         if (first) setTimeout(() => first.focus(), 50);
     }
@@ -1166,19 +1347,19 @@ document.getElementById('btn-modal-cancel').addEventListener('click', () => {
     $overlay.classList.remove('open');
 });
 
-// Close overlay on background click
 $overlay.addEventListener('click', e => {
     if (e.target === $overlay) $overlay.classList.remove('open');
 });
 
-// Escape key closes overlay
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') $overlay.classList.remove('open');
 });
 
 // ── Start execution ──
 async function startExec(item, inputs) {
-    // Reset UI
+    // Save to history before running (records the intent regardless of outcome)
+    if (Object.keys(inputs).length > 0) saveHistory(item.name, inputs);
+
     $welcome.style.display = 'none';
     $output.style.display  = 'block';
     $output.innerHTML      = '';
@@ -1189,7 +1370,6 @@ async function startExec(item, inputs) {
 
     setRunning(true);
 
-    // Get a token from the exec endpoint
     const formData = new FormData();
     formData.append('action', 'exec');
     formData.append('item', item.name);
@@ -1209,29 +1389,20 @@ async function startExec(item, inputs) {
 
     activeToken = token;
 
-    // Build SSE URL with inputs
     const params = new URLSearchParams({ action: 'stream', token, item: item.name });
     for (const [k, v] of Object.entries(inputs)) params.set(k, v);
 
     eventSource = new EventSource(location.pathname + '?' + params.toString());
 
-    eventSource.addEventListener('output', e => {
-        appendOutput(e.data, 'stdout');
-    });
-
-    eventSource.addEventListener('stderr', e => {
-        appendOutput(e.data, 'stderr');
-    });
+    eventSource.addEventListener('output', e => { appendOutput(e.data, 'stdout'); });
+    eventSource.addEventListener('stderr', e => { appendOutput(e.data, 'stderr'); });
 
     eventSource.addEventListener('done', e => {
         eventSource.close();
         eventSource = null;
-
         const d = JSON.parse(e.data);
         showStats(d);
-        if (d.showfiles && d.files && d.files.length > 0) {
-            showFiles(d.files, d.token);
-        }
+        if (d.showfiles && d.files && d.files.length > 0) showFiles(d.files, d.token);
         setRunning(false);
         activeToken = null;
     });
@@ -1270,7 +1441,7 @@ $btnClean.addEventListener('click', async () => {
     const fd = new FormData();
     fd.append('action', 'clean');
     fd.append('token',  tok);
-    const res  = await fetch(location.pathname, { method: 'POST', body: fd });
+    await fetch(location.pathname, { method: 'POST', body: fd });
     $filesSection.style.display = 'none';
     $fileList.innerHTML = '';
 });
@@ -1296,7 +1467,7 @@ function showStats(d) {
     if (d.timed_out) {
         html += `<span class="stat-timeout">&#9888; TIMED OUT</span>`;
     } else {
-        const cls = d.exit === 0 ? 'stat-ok' : 'stat-err';
+        const cls  = d.exit === 0 ? 'stat-ok' : 'stat-err';
         const icon = d.exit === 0 ? '&#10003;' : '&#10007;';
         html += `<span class="${cls}">${icon} Exit: ${d.exit}</span>`;
     }
@@ -1310,9 +1481,9 @@ function showFiles(files, token) {
     $btnClean.dataset.token = token;
 
     files.forEach(f => {
-        const li   = document.createElement('li');
-        const url  = `${location.pathname}?action=download&token=${encodeURIComponent(token)}&file=${encodeURIComponent(f.name)}`;
-        const size = formatBytes(f.size);
+        const li    = document.createElement('li');
+        const url   = `${location.pathname}?action=download&token=${encodeURIComponent(token)}&file=${encodeURIComponent(f.name)}`;
+        const size  = formatBytes(f.size);
         const mtime = new Date(f.mtime * 1000).toLocaleString();
         li.innerHTML = `<a href="${escHtml(url)}" download="${escHtml(f.name)}">${escHtml(f.name)}</a>
             <span class="file-meta">${escHtml(size)} &mdash; ${escHtml(mtime)}</span>`;
@@ -1321,8 +1492,8 @@ function showFiles(files, token) {
 }
 
 function formatBytes(n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
+    if (n < 1024)       return n + ' B';
+    if (n < 1048576)    return (n/1024).toFixed(1) + ' KB';
     if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
     return (n/1073741824).toFixed(1) + ' GB';
 }

@@ -17,6 +17,14 @@ execute_text  = EXECUTE
 ; Omit to disable authentication (local/trusted-network deployments only).
 simplewebauth = /var/www/html/simplewebauth/auth.php
 
+; URL for the "sign out" link shown next to the logged-in username.
+; Typically points to simplewebauth's logout.php.
+logout_url    = /simplewebauth/logout.php
+
+; Number of previous input sets to remember per item (stored in browser localStorage).
+; Set to 0 to disable history entirely.
+history_qty   = 5
+
 ; Maximum seconds a command may run before being killed (0 = unlimited)
 max_runtime   = 0
 

@@ -75,6 +75,8 @@ php_value output_buffering Off
 | `logo` | _(none)_ | URL to logo image shown above the menu |
 | `execute_text` | `EXECUTE` | Default button label for the run button |
 | `simplewebauth` | _(required)_ | Absolute or docroot-relative path to `simplewebauth/auth.php` |
+| `logout_url` | _(none)_ | URL for the sign-out link shown next to the logged-in username |
+| `history_qty` | `5` | Number of previous input sets remembered per item (localStorage); `0` disables history |
 | `max_runtime` | `0` | Max seconds a command may run (0 = unlimited) |
 | `sigkill_wait` | `5` | Seconds between SIGTERM and SIGKILL on cancel (0 = SIGKILL immediately) |
 | `color_bg` | `#0d1117` | Main background color |
@@ -156,7 +158,7 @@ INPUT2   = text      ; user types: deploy done
 
 - **Left pane**: scrollable menu of groups and items
 - **Right pane**: live command output with a terminal-style monospace display
-- **Overlay form**: appears for items with any `INPUTn` defined; shows input fields and the execute button
+- **Overlay form**: appears for items with any `INPUTn` defined; shows input fields, the execute button, and a "Previous runs" history table (if any history exists) with per-row re-run, pre-fill, and delete buttons
 - **While running**: all menu items are disabled; a Cancel button is shown
 - **After completion**: exit code, elapsed time, and (if `SHOWFILES = true`) a file listing with sizes and timestamps; a Clean button deletes the temp dir
 
