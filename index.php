@@ -1377,7 +1377,12 @@ async function startExec(item, inputs) {
 
     let token;
     try {
-        const res  = await fetch(location.pathname, { method: 'POST', body: formData });
+        const res = await fetch(location.pathname, { method: 'POST', body: formData });
+        if (res.redirected || !res.headers.get('content-type')?.includes('json')) {
+            appendOutput('[clido] Session expired — please reload the page to log in again.', 'stderr');
+            setRunning(false);
+            return;
+        }
         const json = await res.json();
         if (json.error) throw new Error(json.error);
         token = json.token;
