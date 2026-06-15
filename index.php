@@ -397,6 +397,14 @@ function action_stream(array $cfg): void {
         }
     }
 
+    // Remove empty temp dir; silently fails if files remain (non-empty)
+    @rmdir($tmpDir);
+
+    // Dir tracking file is only needed if there are downloadable files waiting
+    if (empty($files)) {
+        @unlink(job_dir_file($token));
+    }
+
     $donePayload = [
         'exit'      => $exitCode,
         'elapsed'   => $elapsed,
