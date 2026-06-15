@@ -77,6 +77,7 @@ php_value output_buffering Off
 | `simplewebauth` | _(required)_ | Absolute or docroot-relative path to `simplewebauth/auth.php` |
 | `logout_url` | _(none)_ | URL for the sign-out link shown next to the logged-in username |
 | `history_qty` | `5` | Number of previous input sets remembered per item (localStorage); `0` disables history |
+| `show_command` | `false` | Show the full assembled command as the first line of output (magenta label, white command text); overridable per item |
 | `max_runtime` | `0` | Max seconds a command may run (0 = unlimited) |
 | `sigkill_wait` | `5` | Seconds between SIGTERM and SIGKILL on cancel (0 = SIGKILL immediately) |
 | `color_bg` | `#0d1117` | Main background color |
@@ -136,6 +137,7 @@ execute_text = RUN BACKUP
 | `OPT1_1_DESC`…`OPTn_m_DESC` | Display label for that option (falls back to the value if omitted) |
 | `SHOWFILES` | `true` to list and offer download of files created in the temp dir |
 | `execute_text` | Override the global execute button label for this item |
+| `show_command` | Override global show_command for this item |
 | `max_runtime` | Override global max_runtime for this item |
 
 **Argument assembly**: slots are processed in order 1..N. Each type assembles differently:

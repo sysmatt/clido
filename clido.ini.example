@@ -25,6 +25,10 @@ logout_url    = /simplewebauth/logout.php
 ; Set to 0 to disable history entirely.
 history_qty   = 5
 
+; Show the full assembled command as the first line of output (true/false)
+; Can be overridden per item. Default is false.
+show_command  = false
+
 ; Maximum seconds a command may run before being killed (0 = unlimited)
 max_runtime   = 0
 

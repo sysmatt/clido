@@ -24,6 +24,7 @@ $DEFAULTS = [
     'simplewebauth'   => '',
     'logout_url'      => '',
     'history_qty'     => 5,
+    'show_command'    => false,
     'max_runtime'     => 0,
     'sigkill_wait'    => 5,
     'color_bg'        => '#0d1117',
@@ -82,7 +83,8 @@ function build_item(string $name, array $cfg, array $global): array {
         'description'  => $cfg['description']  ?? '',
         'command'      => $cfg['command']       ?? '',
         'execute_text' => $cfg['execute_text']  ?? $global['execute_text'],
-        'showfiles'    => filter_var($cfg['showfiles'] ?? false, FILTER_VALIDATE_BOOLEAN),
+        'showfiles'    => filter_var($cfg['showfiles']    ?? false,                    FILTER_VALIDATE_BOOLEAN),
+        'show_command' => filter_var($cfg['show_command'] ?? $global['show_command'],  FILTER_VALIDATE_BOOLEAN),
         'max_runtime'  => (int)($cfg['max_runtime'] ?? $global['max_runtime']),
         'args'         => [],   // fixed-prefix args for text slots only
         'inputs'       => [],
@@ -305,6 +307,10 @@ function action_stream(array $cfg): void {
         1 => ['pipe', 'w'],
         2 => ['pipe', 'w'],
     ];
+
+    if ($item['show_command']) {
+        sse('command', $fullCmd);
+    }
 
     $proc = proc_open($fullCmd, $descriptors, $pipes, $tmpDir, null, ['bypass_shell' => false]);
 
@@ -797,9 +803,9 @@ html, body {
     word-break: break-all;
 }
 
-#output .line-stderr {
-    color: #ff7b72;
-}
+#output .line-stderr        { color: #ff7b72; }
+#output .line-command-label { color: #bf5af2; }
+#output .line-command-text  { color: #ffffff; font-weight: 600; }
 
 /* ── Stats bar ── */
 #stats {
@@ -1566,8 +1572,9 @@ async function startExec(item, inputs) {
 
     eventSource = new EventSource(location.pathname + '?' + params.toString());
 
-    eventSource.addEventListener('output', e => { appendOutput(e.data, 'stdout'); });
-    eventSource.addEventListener('stderr', e => { appendOutput(e.data, 'stderr'); });
+    eventSource.addEventListener('command', e => { appendCommand(e.data); });
+    eventSource.addEventListener('output',  e => { appendOutput(e.data, 'stdout'); });
+    eventSource.addEventListener('stderr',  e => { appendOutput(e.data, 'stderr'); });
 
     eventSource.addEventListener('done', e => {
         eventSource.close();
@@ -1623,6 +1630,20 @@ function setRunning(yes) {
     running = yes;
     document.querySelectorAll('.menu-item').forEach(b => b.disabled = yes);
     $btnCancel.style.display = yes ? 'inline-block' : 'none';
+}
+
+function appendCommand(cmd) {
+    const wrap  = document.createElement('span');
+    const label = document.createElement('span');
+    const text  = document.createElement('span');
+    label.className   = 'line-command-label';
+    text.className    = 'line-command-text';
+    label.textContent = 'Executing: ';
+    text.textContent  = cmd + '\n';
+    wrap.appendChild(label);
+    wrap.appendChild(text);
+    $output.appendChild(wrap);
+    $output.scrollTop = $output.scrollHeight;
 }
 
 function appendOutput(text, type) {
