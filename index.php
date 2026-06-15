@@ -824,6 +824,36 @@ html, body {
     cursor: not-allowed;
 }
 
+.menu-item-row {
+    display: flex;
+    align-items: center;
+}
+.menu-item-row .menu-item {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+}
+.menu-popout {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    padding: 4px 5px;
+    margin-right: 6px;
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 0.85em;
+    line-height: 1;
+}
+.menu-item-row:hover .menu-popout {
+    display: flex;
+}
+.menu-popout:hover {
+    color: var(--text);
+    background: var(--accent);
+}
+
 #sidebar-footer {
     padding: 10px 14px;
     border-top: 1px solid var(--border);
@@ -1360,12 +1390,18 @@ foreach ($cfg['groups'] as $entry) {
         $inGroup = true;
         echo '<div class="menu-group-header">' . h($entry['cfg']['title'] ?? $entry['name']) . '</div>';
     } elseif ($entry['type'] === 'item') {
-        $item    = $entry['cfg'];
-        $hasInputs = !empty($item['inputs']);
-        $title   = h($item['title']);
-        $desc    = h($item['description']);
-        $itemJs  = js($item['name']);
-        echo "<button class=\"menu-item\" data-item={$itemJs} title=\"{$desc}\">{$title}</button>\n";
+        $item   = $entry['cfg'];
+        $title  = h($item['title']);
+        $desc   = h($item['description']);
+        $itemJs = js($item['name']);
+        $btn    = "<button class=\"menu-item\" data-item={$itemJs} title=\"{$desc}\">{$title}</button>";
+        if ($item['url']) {
+            $url  = h($item['url']);
+            $icon = "<a class=\"menu-popout\" href=\"{$url}\" target=\"_blank\" rel=\"noopener\" title=\"Open in new tab\">&#8599;</a>";
+            echo "<div class=\"menu-item-row\">{$btn}{$icon}</div>\n";
+        } else {
+            echo $btn . "\n";
+        }
     }
 }
 ?>
