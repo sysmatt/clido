@@ -1815,10 +1815,10 @@ async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
         paths.forEach(p => formData.append(`file_ref_${n}[]`, p));
     }
 
-    // Actual file uploads from the modal
+    // Actual file uploads from the modal — use fi.name+'[]' so PHP builds the array in $_FILES
     if (formFileInputs) {
         formFileInputs.forEach(fi => {
-            for (const file of fi.files) formData.append(fi.name, file);
+            for (const file of fi.files) formData.append(fi.name + '[]', file);
         });
     }
 
