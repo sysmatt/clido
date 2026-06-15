@@ -123,9 +123,9 @@ function build_item(string $name, array $cfg, array $global): array {
                 'options' => $options,
             ];
         } else {
-            // text (default) — fixed ARGn prefix + user value
-            $item['args'][$i] = $hasArg ? $cfg["arg$i"] : null;
-            $item['inputs'][$i] = [
+            // text (default) — fixed prefix and/or user-supplied value
+            if ($hasArg)   $item['args'][$i]   = $cfg["arg$i"];
+            if ($hasInput) $item['inputs'][$i]  = [
                 'type' => 'text',
                 'desc' => $cfg["desc$i"] ?? "Input $i",
             ];
