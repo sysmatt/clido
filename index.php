@@ -84,26 +84,86 @@ function build_item(string $name, array $cfg, array $global): array {
         'execute_text' => $cfg['execute_text']  ?? $global['execute_text'],
         'showfiles'    => filter_var($cfg['showfiles'] ?? false, FILTER_VALIDATE_BOOLEAN),
         'max_runtime'  => (int)($cfg['max_runtime'] ?? $global['max_runtime']),
-        'args'         => [],
+        'args'         => [],   // fixed-prefix args for text slots only
         'inputs'       => [],
     ];
 
-    // Collect ARGn / INPUTn / DESCn (n = 1..32)
     for ($i = 1; $i <= 32; $i++) {
-        $hasArg   = array_key_exists("arg$i",   $cfg);
-        $hasInput = array_key_exists("input$i", $cfg);
-        if (!$hasArg && !$hasInput) continue;
+        $hasArg   = array_key_exists("arg$i",      $cfg);
+        $hasArgOn = array_key_exists("arg{$i}_on", $cfg);
+        $hasInput = array_key_exists("input$i",    $cfg);
+        if (!$hasArg && !$hasArgOn && !$hasInput) continue;
 
-        $item['args'][$i] = $hasArg ? $cfg["arg$i"] : null;
-        if ($hasInput) {
+        $inputType = strtolower(trim($cfg["input$i"] ?? 'text'));
+
+        if ($inputType === 'checkbox') {
             $item['inputs'][$i] = [
-                'type' => $cfg["input$i"],
+                'type'    => 'checkbox',
+                'desc'    => $cfg["desc$i"] ?? "Option $i",
+                'arg_on'  => $cfg["arg{$i}_on"] ?? ($hasArg ? $cfg["arg$i"] : null),
+                'arg_off' => $cfg["arg{$i}_off"] ?? null,
+                'default' => strtolower(trim($cfg["default$i"] ?? 'unchecked')),
+            ];
+        } elseif ($inputType === 'radio' || $inputType === 'select') {
+            $options = [];
+            for ($j = 1; $j <= 32; $j++) {
+                if (!array_key_exists("opt{$i}_{$j}", $cfg)) break;
+                $options[] = [
+                    'value' => $cfg["opt{$i}_{$j}"],
+                    'desc'  => $cfg["opt{$i}_{$j}_desc"] ?? $cfg["opt{$i}_{$j}"],
+                ];
+            }
+            $item['inputs'][$i] = [
+                'type'    => $inputType,
+                'desc'    => $cfg["desc$i"] ?? "Option $i",
+                'arg_pre' => $hasArg ? $cfg["arg$i"] : null,
+                'default' => $cfg["default$i"] ?? ($options[0]['value'] ?? ''),
+                'options' => $options,
+            ];
+        } else {
+            // text (default) — fixed ARGn prefix + user value
+            $item['args'][$i] = $hasArg ? $cfg["arg$i"] : null;
+            $item['inputs'][$i] = [
+                'type' => 'text',
                 'desc' => $cfg["desc$i"] ?? "Input $i",
             ];
         }
     }
 
     return $item;
+}
+
+function assemble_args(array $item, array $userInputs): array {
+    $slots = array_unique(array_merge(
+        array_keys($item['inputs']),
+        array_keys($item['args'])
+    ));
+    sort($slots);
+    $args = [];
+
+    foreach ($slots as $n) {
+        $input = $item['inputs'][$n] ?? null;
+        $type  = $input['type'] ?? null;
+
+        if ($type === 'checkbox') {
+            $checked = ($userInputs["input$n"] ?? '') === 'on';
+            $emit    = $checked ? ($input['arg_on'] ?? null) : ($input['arg_off'] ?? null);
+            if ($emit !== null && $emit !== '') $args[] = escapeshellarg($emit);
+        } elseif ($type === 'radio' || $type === 'select') {
+            if (!empty($input['arg_pre'])) $args[] = escapeshellarg($input['arg_pre']);
+            $val = $userInputs["input$n"] ?? $input['default'] ?? '';
+            if ($val !== '') $args[] = escapeshellarg($val);
+        } else {
+            // text or fixed-arg-only slot
+            $fixedArg = $item['args'][$n] ?? null;
+            if ($fixedArg !== null) $args[] = escapeshellarg($fixedArg);
+            if ($input !== null) {
+                $args[] = escapeshellarg($userInputs["input$n"] ?? '');
+            }
+        }
+    }
+
+    return $args;
 }
 
 function clido_fatal(string $msg): void {
@@ -161,25 +221,9 @@ function action_exec(array $cfg): void {
         exit;
     }
 
-    // Assemble command arguments
-    $args = [];
-    $slots = array_unique(array_merge(array_keys($item['args']), array_keys($item['inputs'])));
-    sort($slots);
-
-    foreach ($slots as $n) {
-        $fixedArg = $item['args'][$n] ?? null;
-        $input    = $item['inputs'][$n] ?? null;
-
-        if ($fixedArg !== null) {
-            $args[] = escapeshellarg($fixedArg);
-        }
-        if ($input !== null) {
-            $userVal = $_POST["input$n"] ?? '';
-            $args[] = escapeshellarg($userVal);
-        }
-    }
-
-    $command = $item['command'];
+    $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
+    $args       = assemble_args($item, $userInputs);
+    $command    = $item['command'];
     if (!$command) {
         http_response_code(400);
         echo json_encode(['error' => 'No command defined for this item']);
@@ -226,25 +270,10 @@ function action_stream(array $cfg): void {
         exit;
     }
 
-    // Assemble command (same logic as exec, but args come via GET)
-    $args = [];
-    $slots = array_unique(array_merge(array_keys($item['args']), array_keys($item['inputs'])));
-    sort($slots);
-
-    foreach ($slots as $n) {
-        $fixedArg = $item['args'][$n] ?? null;
-        $input    = $item['inputs'][$n] ?? null;
-        if ($fixedArg !== null) {
-            $args[] = escapeshellarg($fixedArg);
-        }
-        if ($input !== null) {
-            $userVal = $_GET["input$n"] ?? '';
-            $args[] = escapeshellarg($userVal);
-        }
-    }
-
-    $command = $item['command'];
-    $fullCmd = $command . ($args ? ' ' . implode(' ', $args) : '');
+    $userInputs = array_filter($_GET, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
+    $args       = assemble_args($item, $userInputs);
+    $command    = $item['command'];
+    $fullCmd    = $command . ($args ? ' ' . implode(' ', $args) : '');
 
     $maxRuntime  = $item['max_runtime'];
     $sigkillWait = (int)($cfg['global']['sigkill_wait'] ?? 5);
@@ -1055,6 +1084,84 @@ html, body {
 .hist-btn.hist-run:hover { background: var(--btn); color: var(--btn-text); border-color: var(--btn); }
 
 .hist-btn.hist-del:hover { background: var(--cancel); color: #fff; border-color: var(--cancel); }
+
+/* ── Checkbox input ── */
+.form-row-checkbox { margin-bottom: 10px; }
+
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 0.92em;
+    color: var(--text);
+    user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--btn);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+/* ── Radio group ── */
+.field-label {
+    display: block;
+    font-size: 0.83em;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
+}
+
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.radio-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 0.92em;
+    color: var(--text);
+    user-select: none;
+}
+
+.radio-label input[type="radio"] {
+    accent-color: var(--btn);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+/* ── Select dropdown ── */
+.form-row select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 4px;
+    font-size: 0.92em;
+    width: 100%;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b949e' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+}
+
+.form-row select:focus {
+    outline: none;
+    border-color: var(--btn);
+}
+
+.form-row select option { background: var(--sidebar); }
 </style>
 </head>
 <body>
@@ -1219,6 +1326,15 @@ function deleteHistoryEntry(itemName, idx) {
     localStorage.setItem(histKey(itemName), JSON.stringify(hist));
 }
 
+function histDisplayVal(inp, val) {
+    if (inp.type === 'checkbox') return val === 'on' ? '✓' : '✗';
+    if (inp.type === 'radio' || inp.type === 'select') {
+        const opt = (inp.options || []).find(o => o.value === val);
+        return opt ? (opt.desc || opt.value) : val;
+    }
+    return val;
+}
+
 function renderHistory(item) {
     const hist = loadHistory(item.name);
     if (!hist.length) {
@@ -1237,9 +1353,10 @@ function renderHistory(item) {
 
     hist.forEach((entry, idx) => {
         html += '<tr>';
-        slots.forEach(([n]) => {
-            const val = entry.inputs['input' + n] || '';
-            html += `<td title="${escHtml(val)}">${escHtml(val)}</td>`;
+        slots.forEach(([n, inp]) => {
+            const val     = entry.inputs['input' + n] ?? '';
+            const display = histDisplayVal(inp, val);
+            html += `<td title="${escHtml(val)}">${escHtml(display)}</td>`;
         });
         html += `<td class="history-actions">
             <button type="button" class="hist-btn hist-run" data-idx="${idx}">${execText}</button>
@@ -1268,11 +1385,19 @@ function renderHistory(item) {
             const entry = loadHistory(item.name)[Number(btn.dataset.idx)];
             if (!entry) return;
             Object.entries(entry.inputs).forEach(([k, v]) => {
-                const field = $modalFields.querySelector(`[name="${k}"]`);
-                if (field) field.value = v;
+                const fields = $modalFields.querySelectorAll(`[name="${k}"]`);
+                if (!fields.length) return;
+                const first = fields[0];
+                if (first.type === 'checkbox') {
+                    first.checked = (v === 'on');
+                } else if (first.type === 'radio') {
+                    fields.forEach(r => { r.checked = (r.value === v); });
+                } else {
+                    first.value = v;  // text, select
+                }
             });
-            const first = $modalFields.querySelector('input');
-            if (first) first.focus();
+            const firstText = $modalFields.querySelector('input[type="text"]');
+            if (firstText) firstText.focus();
         });
     });
 
@@ -1315,12 +1440,50 @@ function openItem(item) {
 
         inputs.sort((a,b) => Number(a[0]) - Number(b[0])).forEach(([n, inp]) => {
             const row = document.createElement('div');
-            row.className = 'form-row';
-            const id = `input_field_${n}`;
-            row.innerHTML = `
-                <label for="${id}">${escHtml(inp.desc || ('Input ' + n))}</label>
-                <input type="text" id="${id}" name="input${n}" autocomplete="off">
-            `;
+            const id  = `input_field_${n}`;
+
+            if (inp.type === 'checkbox') {
+                row.className = 'form-row form-row-checkbox';
+                const chk = inp.default === 'checked' ? 'checked' : '';
+                row.innerHTML = `<label class="checkbox-label">
+                    <input type="checkbox" id="${id}" name="input${n}" value="on" ${chk}>
+                    <span>${escHtml(inp.desc || ('Option ' + n))}</span>
+                </label>`;
+
+            } else if (inp.type === 'radio') {
+                row.className = 'form-row';
+                let html = `<span class="field-label">${escHtml(inp.desc || ('Option ' + n))}</span>
+                    <div class="radio-group">`;
+                (inp.options || []).forEach(opt => {
+                    const chk = opt.value === inp.default ? 'checked' : '';
+                    html += `<label class="radio-label">
+                        <input type="radio" name="input${n}" value="${escHtml(opt.value)}" ${chk}>
+                        <span>${escHtml(opt.desc || opt.value)}</span>
+                    </label>`;
+                });
+                html += `</div>`;
+                row.innerHTML = html;
+
+            } else if (inp.type === 'select') {
+                row.className = 'form-row';
+                let html = `<label for="${id}">${escHtml(inp.desc || ('Option ' + n))}</label>
+                    <select id="${id}" name="input${n}">`;
+                (inp.options || []).forEach(opt => {
+                    const sel = opt.value === inp.default ? 'selected' : '';
+                    html += `<option value="${escHtml(opt.value)}" ${sel}>${escHtml(opt.desc || opt.value)}</option>`;
+                });
+                html += `</select>`;
+                row.innerHTML = html;
+
+            } else {
+                // text (default)
+                row.className = 'form-row';
+                row.innerHTML = `
+                    <label for="${id}">${escHtml(inp.desc || ('Input ' + n))}</label>
+                    <input type="text" id="${id}" name="input${n}" autocomplete="off">
+                `;
+            }
+
             $modalFields.appendChild(row);
         });
 
@@ -1339,6 +1502,10 @@ $modalForm.addEventListener('submit', e => {
     const data = new FormData($modalForm);
     const inputs = {};
     for (const [k, v] of data.entries()) inputs[k] = v;
+    // FormData omits unchecked checkboxes — capture them explicitly as 'off'
+    $modalForm.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        if (!(cb.name in inputs)) inputs[cb.name] = 'off';
+    });
     $overlay.classList.remove('open');
     startExec(activeItem, inputs);
 });

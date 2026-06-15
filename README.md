@@ -127,31 +127,57 @@ execute_text = RUN BACKUP
 | `description` | Tooltip shown on hover |
 | `command` | Executable to run (full path recommended) |
 | `ARG1`…`ARGn` | Fixed argument in this position |
-| `INPUT1`…`INPUTn` | User-supplied argument in this position; value = input type (`text`) |
-| `DESC1`…`DESCn` | Label shown next to the input field in the form overlay |
+| `INPUT1`…`INPUTn` | User-supplied argument; value = input type (`text`, `checkbox`, `radio`, `select`) |
+| `DESC1`…`DESCn` | Label shown next to the input field (or beside the checkbox, or above a radio group) |
+| `ARG1_ON`…`ARGn_ON` | For `checkbox`: argument emitted when checked (synonym for `ARGn`) |
+| `ARG1_OFF`…`ARGn_OFF` | For `checkbox`: argument emitted when unchecked (omit to emit nothing) |
+| `DEFAULT1`…`DEFAULTn` | Default value: `checked`/`unchecked` for checkbox; a matching option value for radio/select |
+| `OPT1_1`…`OPTn_m` | For `radio`/`select`: the value passed to the command for option m of slot n |
+| `OPT1_1_DESC`…`OPTn_m_DESC` | Display label for that option (falls back to the value if omitted) |
 | `SHOWFILES` | `true` to list and offer download of files created in the temp dir |
 | `execute_text` | Override the global execute button label for this item |
 | `max_runtime` | Override global max_runtime for this item |
 
-**Argument assembly**: slots are processed in order 1..N. For each slot, `ARGn` is emitted first (if set), then the user's `INPUTn` value (if set). All user input is passed through `escapeshellarg()`.
+**Argument assembly**: slots are processed in order 1..N. Each type assembles differently:
 
-**Example resulting command:**
+- **text**: emits `ARGn` (if set) then the user's typed value
+- **checkbox**: emits `ARGn_ON` when checked, `ARGn_OFF` when unchecked (either may be omitted)
+- **radio** / **select**: emits `ARGn` prefix (if set) then the selected option value
+
+All user-supplied values are passed through `escapeshellarg()`.
+
+**Examples:**
 
 ```ini
+; text — fixed flag + user value
 command  = notify.sh
 ARG1     = --channel
-INPUT1   = text      ; user types: ops
+INPUT1   = text          ; user types: ops
 ARG2     = --message
-INPUT2   = text      ; user types: deploy done
-```
+INPUT2   = text          ; user types: deploy done
+; → notify.sh --channel 'ops' --message 'deploy done'
 
-→ `notify.sh --channel 'ops' --message 'deploy done'`
+; checkbox — toggle a flag
+INPUT3   = checkbox
+DESC3    = Enable compression
+ARG3_ON  = --compress
+ARG3_OFF = --no-compress
+DEFAULT3 = checked
+; → --compress  (or --no-compress if unchecked)
+
+; radio — choose one from a list, with optional prefix
+ARG4     = --format
+INPUT4   = radio
+DESC4    = Output format
+OPT4_1   = json
+OPT4_2   = csv
+DEFAULT4 = json
+; → --format 'json'  (or --format 'csv')
+```
 
 ### Future INPUT types (planned)
 
 - `file` — file upload, passed as a temp path argument
-- `checkbox` — boolean flag (emits ARGn only when checked)
-- `select` — dropdown with predefined choices
 - `pipe` — textarea whose content is piped to the command's stdin
 
 ## UI

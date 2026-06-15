@@ -131,3 +131,47 @@ ARG2          = .
 SHOWFILES     = true
 execute_text  = GENERATE
 max_runtime   = 300
+
+
+[group: Examples]
+title = Input Type Examples
+
+[item: checkbox_example]
+title         = Checkbox Example
+description   = Demonstrates checkbox input — toggle flag on/off
+command       = /bin/echo
+INPUT1        = checkbox
+DESC1         = Enable verbose output
+ARG1_ON       = --verbose
+ARG1_OFF      = --quiet
+DEFAULT1      = checked
+
+[item: radio_example]
+title         = Radio Button Example
+description   = Demonstrates radio input — pick one option
+command       = /bin/echo
+ARG1          = --format
+INPUT1        = radio
+DESC1         = Output format
+OPT1_1        = json
+OPT1_1_DESC   = JSON (machine-readable)
+OPT1_2        = table
+OPT1_2_DESC   = Table (human-readable)
+OPT1_3        = csv
+OPT1_3_DESC   = CSV (spreadsheet)
+DEFAULT1      = table
+
+[item: select_example]
+title         = Select / Dropdown Example
+description   = Demonstrates select input — same as radio but rendered as a dropdown
+command       = /bin/echo
+ARG1          = --compress
+INPUT1        = select
+DESC1         = Compression algorithm
+OPT1_1        = gzip
+OPT1_1_DESC   = Gzip
+OPT1_2        = bzip2
+OPT1_2_DESC   = Bzip2
+OPT1_3        = none
+OPT1_3_DESC   = No compression
+DEFAULT1      = gzip
