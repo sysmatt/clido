@@ -892,6 +892,7 @@ html, body {
 #embed {
     flex: 1;
     overflow: hidden;
+    padding-left: 3px;
 }
 #embed iframe {
     width: 100%;
