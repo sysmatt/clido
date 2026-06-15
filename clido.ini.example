@@ -179,3 +179,32 @@ OPT1_2_DESC   = Bzip2
 OPT1_3        = none
 OPT1_3_DESC   = No compression
 DEFAULT1      = gzip
+
+[item: single_file_example]
+title         = Single File Upload
+description   = Upload one file and pass its path as an argument
+command       = /usr/bin/wc
+ARG1          = -l
+INPUT2        = single_file
+DESC2         = File to count lines in
+; → wc -l /tmp/clido_xxx/uploaded_files2/yourfile.txt
+
+[item: file_list_example]
+title         = File List Upload
+description   = Upload multiple files; all paths passed after a single flag
+command       = /usr/bin/sha256sum
+INPUT1        = file_list
+DESC1         = Files to checksum
+; → sha256sum /tmp/clido_xxx/uploaded_files1/a.txt /tmp/clido_xxx/uploaded_files1/b.txt
+
+[item: file_each_example]
+title         = File Each Upload
+description   = Upload multiple files; each is passed with its own flag prefix
+command       = /usr/local/bin/process_files.sh
+ARG1          = --output-dir
+ARG2          = /tmp/results
+ARG3          = --input
+INPUT3        = file_each
+DESC3         = Input files
+SHOWFILES     = true
+; → process_files.sh --output-dir /tmp/results --input 'a.txt' --input 'b.txt'

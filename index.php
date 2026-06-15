@@ -122,6 +122,12 @@ function build_item(string $name, array $cfg, array $global): array {
                 'default' => $cfg["default$i"] ?? ($options[0]['value'] ?? ''),
                 'options' => $options,
             ];
+        } elseif (in_array($inputType, ['single_file', 'file_list', 'file_each'])) {
+            $item['inputs'][$i] = [
+                'type'    => $inputType,
+                'desc'    => $cfg["desc$i"] ?? "File $i",
+                'arg_pre' => $hasArg ? $cfg["arg$i"] : null,
+            ];
         } else {
             // text (default) — fixed prefix and/or user-supplied value
             if ($hasArg)   $item['args'][$i]   = $cfg["arg$i"];
@@ -135,7 +141,7 @@ function build_item(string $name, array $cfg, array $global): array {
     return $item;
 }
 
-function assemble_args(array $item, array $userInputs): array {
+function assemble_args(array $item, array $userInputs, string $tmpDir = ''): array {
     $slots = array_unique(array_merge(
         array_keys($item['inputs']),
         array_keys($item['args'])
@@ -155,6 +161,24 @@ function assemble_args(array $item, array $userInputs): array {
             if (!empty($input['arg_pre'])) $args[] = escapeshellarg($input['arg_pre']);
             $val = $userInputs["input$n"] ?? $input['default'] ?? '';
             if ($val !== '') $args[] = escapeshellarg($val);
+        } elseif (in_array($type, ['single_file', 'file_list', 'file_each'])) {
+            $subdir = $tmpDir ? $tmpDir . '/uploaded_files' . $n : '';
+            $files  = ($subdir && is_dir($subdir))
+                ? array_values(array_filter(glob($subdir . '/*') ?: [], 'is_file'))
+                : [];
+            if (empty($files)) continue;
+            if ($type === 'single_file') {
+                if (!empty($input['arg_pre'])) $args[] = escapeshellarg($input['arg_pre']);
+                $args[] = escapeshellarg($files[0]);
+            } elseif ($type === 'file_list') {
+                if (!empty($input['arg_pre'])) $args[] = escapeshellarg($input['arg_pre']);
+                foreach ($files as $f) $args[] = escapeshellarg($f);
+            } elseif ($type === 'file_each') {
+                foreach ($files as $f) {
+                    if (!empty($input['arg_pre'])) $args[] = escapeshellarg($input['arg_pre']);
+                    $args[] = escapeshellarg($f);
+                }
+            }
         } else {
             // text or fixed-arg-only slot
             $fixedArg = $item['args'][$n] ?? null;
@@ -216,16 +240,14 @@ function job_dir_file(string $token): string {
 
 function action_exec(array $cfg): void {
     $itemName = $_POST['item'] ?? '';
-    $item = $cfg['items'][$itemName] ?? null;
+    $item     = $cfg['items'][$itemName] ?? null;
     if (!$item) {
         http_response_code(400);
         echo json_encode(['error' => 'Unknown item']);
         exit;
     }
 
-    $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
-    $args       = assemble_args($item, $userInputs);
-    $command    = $item['command'];
+    $command = $item['command'];
     if (!$command) {
         http_response_code(400);
         echo json_encode(['error' => 'No command defined for this item']);
@@ -235,14 +257,60 @@ function action_exec(array $cfg): void {
     $token  = job_token();
     $tmpDir = sys_get_temp_dir() . '/clido_' . $token;
     mkdir($tmpDir, 0700);
-
-    // Store temp dir for later file listing / download / cleanup
     file_put_contents(job_dir_file($token), $tmpDir);
 
-    header('Content-Type: application/json');
-    echo json_encode(['token' => $token, 'tmpdir' => $token]);
+    // Process file inputs — save uploads or copy from previous run (history re-run)
+    $fileRefs = [];
+    $tmpBase  = rtrim(sys_get_temp_dir(), '/') . '/clido_';
+    $fileTypes = ['single_file', 'file_list', 'file_each'];
 
-    // Log to syslog
+    foreach ($item['inputs'] as $n => $input) {
+        if (!in_array($input['type'], $fileTypes)) continue;
+        $subdir = $tmpDir . '/uploaded_files' . $n;
+
+        // History re-run: file paths supplied as file_ref_N[] POST values
+        $refKey = "file_ref_$n";
+        if (!empty($_POST[$refKey])) {
+            $saved = [];
+            foreach ((array)$_POST[$refKey] as $refPath) {
+                $real = realpath($refPath);
+                if (!$real || strpos($real, $tmpBase) !== 0 || !is_file($real)) continue;
+                if (!is_dir($subdir)) mkdir($subdir, 0700);
+                $dest = $subdir . '/' . basename($real);
+                if (copy($real, $dest)) $saved[] = $dest;
+            }
+            if ($saved) $fileRefs["input$n"] = $saved;
+            continue;
+        }
+
+        // New upload via multipart form
+        $fieldKey = "file_input_$n";
+        if (empty($_FILES[$fieldKey]['name'][0])) continue;
+
+        $names    = (array)$_FILES[$fieldKey]['name'];
+        $tmpNames = (array)$_FILES[$fieldKey]['tmp_name'];
+        $errors   = (array)$_FILES[$fieldKey]['error'];
+        $count    = ($input['type'] === 'single_file') ? 1 : count($names);
+        $saved    = [];
+
+        for ($j = 0; $j < $count; $j++) {
+            if (($errors[$j] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) continue;
+            $safeName = basename($names[$j] ?? '');
+            if ($safeName === '' || $safeName === '.' || $safeName === '..') continue;
+            if (!is_dir($subdir)) mkdir($subdir, 0700);
+            $dest = $subdir . '/' . $safeName;
+            if (move_uploaded_file($tmpNames[$j], $dest)) $saved[] = $dest;
+        }
+        if ($saved) $fileRefs["input$n"] = $saved;
+    }
+
+    // Assemble args now that files are in place (for accurate syslog)
+    $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
+    $args       = assemble_args($item, $userInputs, $tmpDir);
+
+    header('Content-Type: application/json');
+    echo json_encode(['token' => $token, 'file_refs' => $fileRefs]);
+
     $authUser = function_exists('auth_user') ? auth_user() : 'anonymous';
     $fullCmd  = $command . ($args ? ' ' . implode(' ', $args) : '');
     openlog('clido', LOG_PID, LOG_USER);
@@ -273,7 +341,7 @@ function action_stream(array $cfg): void {
     }
 
     $userInputs = array_filter($_GET, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
-    $args       = assemble_args($item, $userInputs);
+    $args       = assemble_args($item, $userInputs, $tmpDir);
     $command    = $item['command'];
     $fullCmd    = $command . ($args ? ' ' . implode(' ', $args) : '');
 
@@ -550,6 +618,25 @@ function clido_rmdir(string $dir): void {
 }
 
 // ---------------------------------------------------------------------------
+// Action: check_refs (POST — reports which uploaded file dirs still exist)
+// ---------------------------------------------------------------------------
+
+function action_check_refs(): void {
+    $dirs    = (array)($_POST['dirs'] ?? []);
+    $tmpBase = rtrim(sys_get_temp_dir(), '/') . '/clido_';
+    $result  = [];
+
+    foreach ($dirs as $dir) {
+        $real = realpath($dir);
+        if (!$real || strpos($real, $tmpBase) !== 0) continue;
+        $result[$dir] = is_dir($real) && !empty(glob($real . '/*'));
+    }
+
+    echo json_encode($result);
+    exit;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -574,6 +661,9 @@ if ($action === 'exec') {
 } elseif ($action === 'clean') {
     header('Content-Type: application/json');
     action_clean($cfg);
+} elseif ($action === 'check_refs') {
+    header('Content-Type: application/json');
+    action_check_refs();
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,6 +1266,56 @@ html, body {
 }
 
 .form-row select option { background: var(--sidebar); }
+
+/* ── File drop zone ── */
+.file-drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 6px;
+    padding: 18px 14px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+}
+.file-drop-zone:hover,
+.file-drop-zone.drag-over {
+    border-color: var(--btn);
+    background: var(--accent);
+}
+.file-drop-icon {
+    font-size: 1.4em;
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+}
+.file-drop-text {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+.file-browse-link {
+    color: var(--btn);
+    text-decoration: underline;
+    cursor: pointer;
+}
+.file-names-preview {
+    list-style: none;
+    margin-top: 8px;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.file-names-preview li {
+    font-size: 0.8em;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.file-names-preview .file-size {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -1324,12 +1464,22 @@ function loadHistory(itemName) {
     catch { return []; }
 }
 
-function saveHistory(itemName, inputs) {
-    if (Object.values(inputs).every(v => !String(v).trim())) return;
+function saveHistory(itemName, inputs, fileRefs = {}) {
+    const hasText  = Object.values(inputs).some(v => String(v).trim());
+    const hasFiles = Object.keys(fileRefs).length > 0;
+    if (!hasText && !hasFiles) return;
+
     let hist = loadHistory(itemName);
-    const sig = JSON.stringify(inputs);
-    hist = hist.filter(e => JSON.stringify(e.inputs) !== sig);
-    hist.unshift({ inputs, ts: Math.floor(Date.now() / 1000) });
+    const entry = { inputs, ts: Math.floor(Date.now() / 1000) };
+    if (hasFiles) entry.file_refs = fileRefs;
+
+    // Only deduplicate text-only entries; file runs are always unique per tmpDir
+    if (!hasFiles) {
+        const sig = JSON.stringify(inputs);
+        hist = hist.filter(e => !e.file_refs && JSON.stringify(e.inputs) !== sig);
+    }
+
+    hist.unshift(entry);
     hist = hist.slice(0, HISTORY_QTY);
     localStorage.setItem(histKey(itemName), JSON.stringify(hist));
 }
@@ -1349,51 +1499,76 @@ function histDisplayVal(inp, val) {
     return val;
 }
 
-function renderHistory(item) {
+function renderHistory(item, dirStatus = {}) {
     const hist = loadHistory(item.name);
     if (!hist.length) {
         $modalHistory.style.display = 'none';
         return;
     }
 
-    const slots = Object.entries(item.inputs || {}).sort((a,b) => Number(a[0]) - Number(b[0]));
-    const execText = escHtml(item.execute_text || 'EXECUTE');
+    const slots     = Object.entries(item.inputs || {}).sort((a,b) => Number(a[0]) - Number(b[0]));
+    const execText  = escHtml(item.execute_text || 'EXECUTE');
+    const fileTypes = ['single_file', 'file_list', 'file_each'];
 
     let html = '<table class="history-table"><thead><tr>';
     slots.forEach(([n, inp]) => {
-        html += `<th>${escHtml(inp.desc || ('Input ' + n))}</th>`;
+        const label = fileTypes.includes(inp.type)
+            ? (inp.desc || ('File ' + n))
+            : (inp.desc || ('Input ' + n));
+        html += `<th>${escHtml(label)}</th>`;
     });
     html += '<th></th></tr></thead><tbody>';
 
     hist.forEach((entry, idx) => {
-        html += '<tr>';
+        let anyMissing = false;
+        let rowCells   = '';
+
         slots.forEach(([n, inp]) => {
-            const val     = entry.inputs['input' + n] ?? '';
-            const display = histDisplayVal(inp, val);
-            html += `<td title="${escHtml(val)}">${escHtml(display)}</td>`;
+            if (fileTypes.includes(inp.type)) {
+                const paths = (entry.file_refs || {})['input' + n] || [];
+                if (!paths.length) {
+                    rowCells += `<td class="muted">—</td>`;
+                } else {
+                    const dir   = paths[0].substring(0, paths[0].lastIndexOf('/'));
+                    const avail = dirStatus[dir];
+                    const icon  = avail === false ? '⚠' : '📁';
+                    const names = paths.map(p => p.substring(p.lastIndexOf('/') + 1)).join(', ');
+                    const trunc = names.length > 32 ? names.slice(0, 32) + '…' : names;
+                    const style = avail === false ? ' style="color:var(--cancel)"' : '';
+                    if (avail === false) anyMissing = true;
+                    rowCells += `<td${style} title="${escHtml(names)}">${icon} ${escHtml(trunc)}</td>`;
+                }
+            } else {
+                const val     = entry.inputs['input' + n] ?? '';
+                const display = histDisplayVal(inp, val);
+                rowCells += `<td title="${escHtml(String(val))}">${escHtml(String(display))}</td>`;
+            }
         });
-        html += `<td class="history-actions">
-            <button type="button" class="hist-btn hist-run" data-idx="${idx}">${execText}</button>
+
+        const disRun = anyMissing ? ' disabled title="Uploaded files are no longer available"' : '';
+        rowCells += `<td class="history-actions">
+            <button type="button" class="hist-btn hist-run" data-idx="${idx}"${disRun}>${execText}</button>
             <button type="button" class="hist-btn hist-edit" data-idx="${idx}" title="Pre-fill fields">&#9998;</button>
             <button type="button" class="hist-btn hist-del"  data-idx="${idx}" title="Remove from history">&times;</button>
-        </td></tr>`;
+        </td>`;
+        html += `<tr>${rowCells}</tr>`;
     });
 
     html += '</tbody></table>';
     $modalHistBody.innerHTML = html;
     $modalHistory.style.display = 'block';
 
-    // Run button: close modal and execute immediately
+    // Run button: close modal and execute with saved file refs
     $modalHistBody.querySelectorAll('.hist-run').forEach(btn => {
         btn.addEventListener('click', () => {
             const entry = loadHistory(item.name)[Number(btn.dataset.idx)];
             if (!entry) return;
             $overlay.classList.remove('open');
-            startExec(item, entry.inputs);
+            startExec(item, entry.inputs, entry.file_refs || {}, null);
         });
     });
 
-    // Edit button: pre-fill form fields, keep modal open
+    // Edit button: pre-fill non-file form fields, keep modal open
     $modalHistBody.querySelectorAll('.hist-edit').forEach(btn => {
         btn.addEventListener('click', () => {
             const entry = loadHistory(item.name)[Number(btn.dataset.idx)];
@@ -1407,20 +1582,77 @@ function renderHistory(item) {
                 } else if (first.type === 'radio') {
                     fields.forEach(r => { r.checked = (r.value === v); });
                 } else {
-                    first.value = v;  // text, select
+                    first.value = v;
                 }
             });
-            const firstText = $modalFields.querySelector('input[type="text"]');
-            if (firstText) firstText.focus();
+            const firstInput = $modalFields.querySelector('input[type="text"], select');
+            if (firstInput) firstInput.focus();
         });
     });
 
-    // Delete button: remove entry and re-render
+    // Delete button: remove entry and re-render with fresh status check
     $modalHistBody.querySelectorAll('.hist-del').forEach(btn => {
         btn.addEventListener('click', () => {
             deleteHistoryEntry(item.name, Number(btn.dataset.idx));
-            renderHistory(item);
+            renderHistory(item, {});
+            checkFileRefsAndUpdate(item);
         });
+    });
+}
+
+async function checkFileRefsAndUpdate(item) {
+    const hist = loadHistory(item.name);
+    const dirs = new Set();
+    hist.forEach(e => {
+        if (!e.file_refs) return;
+        Object.values(e.file_refs).forEach(paths =>
+            paths.forEach(p => dirs.add(p.substring(0, p.lastIndexOf('/'))))
+        );
+    });
+    if (!dirs.size) return;
+
+    const fd = new FormData();
+    [...dirs].forEach(d => fd.append('dirs[]', d));
+    try {
+        const res = await fetch(`${location.pathname}?action=check_refs`, { method: 'POST', body: fd });
+        if (!res.ok) return;
+        const dirStatus = await res.json();
+        renderHistory(item, dirStatus);
+    } catch { /* ignore */ }
+}
+
+function initDropZones() {
+    $modalFields.querySelectorAll('.file-drop-zone').forEach(zone => {
+        const input   = zone.querySelector('.file-input-hidden');
+        const preview = zone.querySelector('.file-names-preview');
+
+        zone.addEventListener('click', e => {
+            if (!e.target.closest('.file-names-preview')) input.click();
+        });
+        zone.addEventListener('dragenter', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+        zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+        zone.addEventListener('dragleave', e => {
+            if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
+        });
+        zone.addEventListener('drop', e => {
+            e.preventDefault();
+            zone.classList.remove('drag-over');
+            const dt    = new DataTransfer();
+            const files = input.multiple ? [...e.dataTransfer.files] : [e.dataTransfer.files[0]];
+            files.filter(Boolean).forEach(f => dt.items.add(f));
+            input.files = dt.files;
+            updateFilePreview(preview, input.files);
+        });
+        input.addEventListener('change', () => updateFilePreview(preview, input.files));
+    });
+}
+
+function updateFilePreview(preview, files) {
+    preview.innerHTML = '';
+    [...files].forEach(f => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>&#128196; ${escHtml(f.name)}</span><span class="file-size">${formatBytes(f.size)}</span>`;
+        preview.appendChild(li);
     });
 }
 
@@ -1489,6 +1721,19 @@ function openItem(item) {
                 html += `</select>`;
                 row.innerHTML = html;
 
+            } else if (['single_file', 'file_list', 'file_each'].includes(inp.type)) {
+                row.className = 'form-row';
+                const multi = inp.type !== 'single_file' ? 'multiple' : '';
+                row.innerHTML = `
+                    <label>${escHtml(inp.desc || ('File ' + n))}</label>
+                    <div class="file-drop-zone" data-slot="${n}">
+                        <input type="file" class="file-input-hidden" name="file_input_${n}" ${multi} style="display:none" tabindex="-1">
+                        <span class="file-drop-icon">&#8679;</span>
+                        <span class="file-drop-text">Drop ${inp.type !== 'single_file' ? 'files' : 'a file'} here or <span class="file-browse-link">browse</span></span>
+                        <ul class="file-names-preview"></ul>
+                    </div>
+                `;
+
             } else {
                 // text (default)
                 row.className = 'form-row';
@@ -1501,10 +1746,12 @@ function openItem(item) {
             $modalFields.appendChild(row);
         });
 
-        renderHistory(item);
+        initDropZones();
+        renderHistory(item, {});
+        checkFileRefsAndUpdate(item);
 
         $overlay.classList.add('open');
-        const first = $modalFields.querySelector('input');
+        const first = $modalFields.querySelector('input[type="text"], input[type="checkbox"], input[type="radio"], select');
         if (first) setTimeout(() => first.focus(), 50);
     }
 }
@@ -1515,13 +1762,17 @@ $modalForm.addEventListener('submit', e => {
     if (running) return;
     const data = new FormData($modalForm);
     const inputs = {};
-    for (const [k, v] of data.entries()) inputs[k] = v;
+    for (const [k, v] of data.entries()) {
+        if (k.startsWith('file_input_') || v instanceof File) continue;
+        inputs[k] = v;
+    }
     // FormData omits unchecked checkboxes — capture them explicitly as 'off'
     $modalForm.querySelectorAll('input[type="checkbox"]').forEach(cb => {
         if (!(cb.name in inputs)) inputs[cb.name] = 'off';
     });
+    const fileInputs = [...$modalForm.querySelectorAll('input[type="file"]')].filter(fi => fi.files.length > 0);
     $overlay.classList.remove('open');
-    startExec(activeItem, inputs);
+    startExec(activeItem, inputs, {}, fileInputs.length ? fileInputs : null);
 });
 
 document.getElementById('btn-modal-cancel').addEventListener('click', () => {
@@ -1537,10 +1788,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Start execution ──
-async function startExec(item, inputs) {
-    // Save to history before running (records the intent regardless of outcome)
-    if (Object.keys(inputs).length > 0) saveHistory(item.name, inputs);
-
+async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
     $welcome.style.display = 'none';
     $output.style.display  = 'block';
     $output.innerHTML      = '';
@@ -1551,10 +1799,28 @@ async function startExec(item, inputs) {
 
     setRunning(true);
 
+    const hasUploads = formFileInputs && formFileInputs.length > 0;
+    const hasRefs    = Object.keys(fileRefs).length > 0;
+    if (hasUploads) appendOutput('[clido] Uploading files…', 'stderr');
+    else if (hasRefs) appendOutput('[clido] Preparing files from previous run…', 'stderr');
+
     const formData = new FormData();
     formData.append('action', 'exec');
     formData.append('item', item.name);
     for (const [k, v] of Object.entries(inputs)) formData.append(k, v);
+
+    // File paths from a history re-run — PHP copies them into the new tmpDir
+    for (const [inputKey, paths] of Object.entries(fileRefs)) {
+        const n = inputKey.replace('input', '');
+        paths.forEach(p => formData.append(`file_ref_${n}[]`, p));
+    }
+
+    // Actual file uploads from the modal
+    if (formFileInputs) {
+        formFileInputs.forEach(fi => {
+            for (const file of fi.files) formData.append(fi.name, file);
+        });
+    }
 
     let token;
     try {
@@ -1567,6 +1833,11 @@ async function startExec(item, inputs) {
         const json = await res.json();
         if (json.error) throw new Error(json.error);
         token = json.token;
+        // Save history after exec so file_refs paths (assigned by server) are captured
+        const savedRefs = json.file_refs || {};
+        if (Object.keys(inputs).length > 0 || Object.keys(savedRefs).length > 0) {
+            saveHistory(item.name, inputs, savedRefs);
+        }
     } catch (err) {
         appendOutput('[clido error] Failed to start: ' + err.message, 'stderr');
         setRunning(false);

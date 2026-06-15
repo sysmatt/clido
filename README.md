@@ -128,7 +128,7 @@ execute_text = RUN BACKUP
 | `description` | Tooltip shown on hover |
 | `command` | Executable to run (full path recommended) |
 | `ARG1`…`ARGn` | Fixed argument in this position |
-| `INPUT1`…`INPUTn` | User-supplied argument; value = input type (`text`, `checkbox`, `radio`, `select`) |
+| `INPUT1`…`INPUTn` | User-supplied argument; value = input type (`text`, `checkbox`, `radio`, `select`, `single_file`, `file_list`, `file_each`) |
 | `DESC1`…`DESCn` | Label shown next to the input field (or beside the checkbox, or above a radio group) |
 | `ARG1_ON`…`ARGn_ON` | For `checkbox`: argument emitted when checked (synonym for `ARGn`) |
 | `ARG1_OFF`…`ARGn_OFF` | For `checkbox`: argument emitted when unchecked (omit to emit nothing) |
@@ -145,8 +145,13 @@ execute_text = RUN BACKUP
 - **text**: emits `ARGn` (if set) then the user's typed value
 - **checkbox**: emits `ARGn_ON` when checked, `ARGn_OFF` when unchecked (either may be omitted)
 - **radio** / **select**: emits `ARGn` prefix (if set) then the selected option value
+- **single_file**: emits `ARGn` prefix (if set) then the path of the single uploaded file
+- **file_list**: emits `ARGn` prefix once (if set) then all uploaded file paths as separate arguments
+- **file_each**: emits `ARGn` prefix + path once per file (prefix repeats for each file)
 
 All user-supplied values are passed through `escapeshellarg()`.
+
+**File upload inputs** present a drag-and-drop zone in the modal. Uploaded files are stored in a per-execution temp directory. File paths from previous runs are recorded in browser localStorage; re-running a history entry copies the files into a new temp directory. The history table shows `📁` for available files and `⚠` for files whose temp directory has been cleaned up.
 
 **Examples:**
 
@@ -177,10 +182,6 @@ DEFAULT4 = json
 ; → --format 'json'  (or --format 'csv')
 ```
 
-### Future INPUT types (planned)
-
-- `file` — file upload, passed as a temp path argument
-- `pipe` — textarea whose content is piped to the command's stdin
 
 ## UI
 
