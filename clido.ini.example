@@ -61,7 +61,7 @@ title = System Tools
 title         = Disk Usage
 description   = Show disk usage for all mounted filesystems
 command       = /bin/df
-ARG1          = -h
+arg1          = -h
 
 [item: uptime]
 title         = Uptime
@@ -72,7 +72,7 @@ command       = /usr/bin/uptime
 title         = Process List
 description   = Show running processes
 command       = /bin/ps
-ARG1          = aux
+arg1          = aux
 
 
 [group: Files]
@@ -82,22 +82,22 @@ title = File Tools
 title         = List Directory
 description   = List the contents of a directory
 command       = /bin/ls
-ARG1          = -lah
-INPUT2        = text
-DESC2         = Directory path
+arg1          = -lah
+input2        = text
+desc2         = Directory path
 execute_text  = LIST
 
 [item: find_files]
 title         = Find Files
 description   = Search for files matching a pattern
 command       = /usr/bin/find
-INPUT1        = text
-DESC1         = Search path (e.g. /var/log)
-ARG2          = -name
-INPUT3        = text
-DESC3         = Filename pattern (e.g. *.log)
-ARG4          = -type
-ARG5          = f
+input1        = text
+desc1         = Search path (e.g. /var/log)
+arg2          = -name
+input3        = text
+desc3         = Filename pattern (e.g. *.log)
+arg4          = -type
+arg5          = f
 
 
 [group: Network]
@@ -107,19 +107,19 @@ title = Network Tools
 title         = Ping Host
 description   = Ping a hostname or IP address
 command       = /bin/ping
-ARG1          = -c
-ARG2          = 5
-INPUT3        = text
-DESC3         = Hostname or IP
+arg1          = -c
+arg2          = 5
+input3        = text
+desc3         = Hostname or IP
 execute_text  = PING
 
 [item: dns_lookup]
 title         = DNS Lookup
 description   = Resolve a hostname
 command       = /usr/bin/dig
-ARG1          = +short
-INPUT2        = text
-DESC2         = Hostname to resolve
+arg1          = +short
+input2        = text
+desc2         = Hostname to resolve
 execute_text  = RESOLVE
 
 
@@ -130,11 +130,31 @@ title = Reports
 title         = Generate Report
 description   = Generate and download the daily report archive
 command       = /usr/local/bin/generate_report.sh
-ARG1          = --output-dir
-ARG2          = .
-SHOWFILES     = true
+arg1          = --output-dir
+arg2          = .
+showfiles     = true
 execute_text  = GENERATE
 max_runtime   = 300
+
+
+[group: Embedded Tools]
+title = Embedded Tools
+
+; URL items embed the target in the right pane instead of running a command.
+; Omit command= entirely — just set url=.
+; Note: the remote site must allow framing (no X-Frame-Options: DENY).
+; Internal tools (Portainer, Grafana, Proxmox, pfSense, etc.) generally work fine.
+; Most public internet sites will refuse to be embedded.
+
+[item: portainer]
+title         = Portainer
+description   = Container management dashboard
+url           = https://portainer.internal:9000
+
+[item: grafana]
+title         = Grafana
+description   = Metrics and dashboards
+url           = https://grafana.internal:3000
 
 
 [group: Examples]
@@ -144,67 +164,67 @@ title = Input Type Examples
 title         = Checkbox Example
 description   = Demonstrates checkbox input — toggle flag on/off
 command       = /bin/echo
-INPUT1        = checkbox
-DESC1         = Enable verbose output
-ARG1_ON       = --verbose
-ARG1_OFF      = --quiet
-DEFAULT1      = checked
+input1        = checkbox
+desc1         = Enable verbose output
+arg1_on       = --verbose
+arg1_off      = --quiet
+default1      = checked
 
 [item: radio_example]
 title         = Radio Button Example
 description   = Demonstrates radio input — pick one option
 command       = /bin/echo
-ARG1          = --format
-INPUT1        = radio
-DESC1         = Output format
-OPT1_1        = json
-OPT1_1_DESC   = JSON (machine-readable)
-OPT1_2        = table
-OPT1_2_DESC   = Table (human-readable)
-OPT1_3        = csv
-OPT1_3_DESC   = CSV (spreadsheet)
-DEFAULT1      = table
+arg1          = --format
+input1        = radio
+desc1         = Output format
+opt1_1        = json
+opt1_1_desc   = JSON (machine-readable)
+opt1_2        = table
+opt1_2_desc   = Table (human-readable)
+opt1_3        = csv
+opt1_3_desc   = CSV (spreadsheet)
+default1      = table
 
 [item: select_example]
 title         = Select / Dropdown Example
 description   = Demonstrates select input — same as radio but rendered as a dropdown
 command       = /bin/echo
-ARG1          = --compress
-INPUT1        = select
-DESC1         = Compression algorithm
-OPT1_1        = gzip
-OPT1_1_DESC   = Gzip
-OPT1_2        = bzip2
-OPT1_2_DESC   = Bzip2
-OPT1_3        = none
-OPT1_3_DESC   = No compression
-DEFAULT1      = gzip
+arg1          = --compress
+input1        = select
+desc1         = Compression algorithm
+opt1_1        = gzip
+opt1_1_desc   = Gzip
+opt1_2        = bzip2
+opt1_2_desc   = Bzip2
+opt1_3        = none
+opt1_3_desc   = No compression
+default1      = gzip
 
 [item: single_file_example]
 title         = Single File Upload
 description   = Upload one file and pass its path as an argument
 command       = /usr/bin/wc
-ARG1          = -l
-INPUT2        = single_file
-DESC2         = File to count lines in
+arg1          = -l
+input2        = single_file
+desc2         = File to count lines in
 ; → wc -l /tmp/clido_xxx/uploaded_files2/yourfile.txt
 
 [item: file_list_example]
 title         = File List Upload
 description   = Upload multiple files; all paths passed after a single flag
 command       = /usr/bin/sha256sum
-INPUT1        = file_list
-DESC1         = Files to checksum
+input1        = file_list
+desc1         = Files to checksum
 ; → sha256sum /tmp/clido_xxx/uploaded_files1/a.txt /tmp/clido_xxx/uploaded_files1/b.txt
 
 [item: file_each_example]
 title         = File Each Upload
 description   = Upload multiple files; each is passed with its own flag prefix
 command       = /usr/local/bin/process_files.sh
-ARG1          = --output-dir
-ARG2          = /tmp/results
-ARG3          = --input
-INPUT3        = file_each
-DESC3         = Input files
-SHOWFILES     = true
+arg1          = --output-dir
+arg2          = /tmp/results
+arg3          = --input
+input3        = file_each
+desc3         = Input files
+showfiles     = true
 ; → process_files.sh --output-dir /tmp/results --input 'a.txt' --input 'b.txt'

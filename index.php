@@ -82,6 +82,7 @@ function build_item(string $name, array $cfg, array $global): array {
         'title'        => $cfg['title']        ?? $name,
         'description'  => $cfg['description']  ?? '',
         'command'      => $cfg['command']       ?? '',
+        'url'          => $cfg['url']           ?? '',
         'execute_text' => $cfg['execute_text']  ?? $global['execute_text'],
         'showfiles'    => filter_var($cfg['showfiles']    ?? false,                    FILTER_VALIDATE_BOOLEAN),
         'show_command' => filter_var($cfg['show_command'] ?? $global['show_command'],  FILTER_VALIDATE_BOOLEAN),
@@ -888,6 +889,17 @@ html, body {
     flex-direction: column;
 }
 
+#embed {
+    flex: 1;
+    overflow: hidden;
+}
+#embed iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+}
+
 #output {
     flex: 1;
     overflow-y: auto;
@@ -1382,6 +1394,9 @@ foreach ($cfg['groups'] as $entry) {
       <div id="output" style="display:none"></div>
     </div>
 
+    <!-- Embedded URL pane -->
+    <div id="embed" style="display:none"></div>
+
     <!-- Stats bar -->
     <div id="stats" style="display:none"></div>
 
@@ -1421,6 +1436,7 @@ const ITEMS = <?= js(array_map(function($i) {
         'name'         => $i['name'],
         'title'        => $i['title'],
         'description'  => $i['description'],
+        'url'          => $i['url'],
         'inputs'       => $i['inputs'],
         'execute_text' => $i['execute_text'],
         'showfiles'    => $i['showfiles'],
@@ -1440,6 +1456,8 @@ const $menu          = document.getElementById('menu');
 const $toolbar       = document.getElementById('toolbar-title');
 const $toolDesc      = document.getElementById('toolbar-desc');
 const $output        = document.getElementById('output');
+const $outputWrap    = document.getElementById('output-wrap');
+const $embed         = document.getElementById('embed');
 const $welcome       = document.getElementById('welcome');
 const $stats         = document.getElementById('stats');
 const $filesSection  = document.getElementById('files-section');
@@ -1666,6 +1684,17 @@ $menu.addEventListener('click', e => {
     openItem(item);
 });
 
+function showEmbed(url) {
+    $outputWrap.style.display   = 'none';
+    $stats.style.display        = 'none';
+    $filesSection.style.display = 'none';
+    $embed.innerHTML = '';
+    const iframe = document.createElement('iframe');
+    iframe.src = url;
+    $embed.appendChild(iframe);
+    $embed.style.display = 'flex';
+}
+
 function openItem(item) {
     activeItem = item;
     document.querySelectorAll('.menu-item').forEach(b => b.classList.remove('active'));
@@ -1674,6 +1703,16 @@ function openItem(item) {
     $toolbar.textContent  = item.title;
     $toolbar.style.color  = 'var(--text)';
     $toolDesc.textContent = item.description || '';
+
+    if (item.url) {
+        showEmbed(item.url);
+        return;
+    }
+
+    // Leaving an embed — restore the output pane
+    $embed.style.display      = 'none';
+    $embed.innerHTML          = '';
+    $outputWrap.style.display = '';
 
     const inputs = Object.entries(item.inputs || {});
     if (inputs.length === 0) {
