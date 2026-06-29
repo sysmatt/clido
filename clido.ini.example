@@ -35,6 +35,11 @@ max_runtime   = 0
 ; Seconds to wait between SIGTERM and SIGKILL when cancelling (0 = SIGKILL immediately)
 sigkill_wait  = 5
 
+; ttyd terminal items — port range reserved for ttyd processes (must be proxied by nginx/Apache)
+; ttyd_port_min = 7681
+; ttyd_port_max = 7699
+; ttyd_bin      = ttyd   ; full path if ttyd is not on the web server's PATH
+
 ; Dark-mode color palette — all values are CSS colors
 ; color_bg          = #0d1117
 ; color_sidebar     = #161b22
@@ -135,6 +140,30 @@ arg2          = .
 showfiles     = true
 execute_text  = GENERATE
 max_runtime   = 300
+
+
+[group: Terminal Tools]
+title = Terminal Tools
+
+; ttyd items open a full interactive terminal in the right pane using ttyd.
+; Requires ttyd installed (apt install ttyd) and nginx/Apache configured to proxy
+; /ttyd/<port>/ to 127.0.0.1:<port>/ with WebSocket upgrade headers — see README.
+
+[item: htop]
+title         = htop
+description   = Interactive process viewer
+command       = /usr/bin/htop
+ttyd          = true
+
+[item: tail_log]
+title         = Tail Log
+description   = Follow a log file in a live terminal
+command       = /usr/bin/tail
+arg1          = -f
+input2        = text
+desc2         = Log file path (e.g. /var/log/syslog)
+ttyd          = true
+execute_text  = FOLLOW
 
 
 [group: Embedded Tools]

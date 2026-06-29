@@ -38,6 +38,9 @@ $DEFAULTS = [
     'color_cancel'    => '#da3633',
     'color_output_bg' => '#010409',
     'color_output_text'=> '#39d353',
+    'ttyd_port_min'    => 7681,
+    'ttyd_port_max'    => 7699,
+    'ttyd_bin'         => 'ttyd',
 ];
 
 // ---------------------------------------------------------------------------
@@ -85,6 +88,7 @@ function build_item(string $name, array $cfg, array $global): array {
         'url'          => $cfg['url']           ?? '',
         'execute_text' => $cfg['execute_text']  ?? $global['execute_text'],
         'showfiles'    => filter_var($cfg['showfiles']    ?? false,                    FILTER_VALIDATE_BOOLEAN),
+        'ttyd'         => filter_var($cfg['ttyd']         ?? false,                    FILTER_VALIDATE_BOOLEAN),
         'show_command' => filter_var($cfg['show_command'] ?? $global['show_command'],  FILTER_VALIDATE_BOOLEAN),
         'max_runtime'  => (int)($cfg['max_runtime'] ?? $global['max_runtime']),
         'args'         => [],   // fixed-prefix args for text slots only
@@ -619,6 +623,132 @@ function clido_rmdir(string $dir): void {
 }
 
 // ---------------------------------------------------------------------------
+// ttyd: terminal item helpers
+// ---------------------------------------------------------------------------
+
+function ttyd_pid_file(string $token): string {
+    return sys_get_temp_dir() . "/clido_ttyd_pid_$token";
+}
+
+function ttyd_find_free_port(int $min, int $max): int|false {
+    for ($port = $min; $port <= $max; $port++) {
+        $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
+        if ($sock) { fclose($sock); continue; }  // something already listening
+        return $port;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Action: ttyd_start (POST — spawn ttyd, return proxy URL)
+// ---------------------------------------------------------------------------
+
+function action_ttyd_start(array $cfg): void {
+    $itemName = $_POST['item'] ?? '';
+    $item     = $cfg['items'][$itemName] ?? null;
+
+    if (!$item || !$item['ttyd'] || !$item['command']) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid item']);
+        exit;
+    }
+
+    $portMin = (int)($cfg['global']['ttyd_port_min'] ?? 7681);
+    $portMax = (int)($cfg['global']['ttyd_port_max'] ?? 7699);
+
+    $port = ttyd_find_free_port($portMin, $portMax);
+    if ($port === false) {
+        http_response_code(503);
+        echo json_encode(['error' => 'No ttyd ports available — all slots in use']);
+        exit;
+    }
+
+    // 32-char random hex token embedded in the URL path — this is the auth secret
+    $token    = bin2hex(random_bytes(16));
+    $basePath = '/' . $token . '/';
+    $proxyUrl = '/ttyd/' . $port . $basePath;
+
+    $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
+    $args       = assemble_args($item, $userInputs, '');  // empty tmpDir: file inputs emit nothing
+
+    $ttydBin = escapeshellarg($cfg['global']['ttyd_bin'] ?? 'ttyd');
+    $ttydCmd = 'nohup ' . $ttydBin
+        . ' --port ' . (int)$port
+        . ' --base-path ' . escapeshellarg($basePath)
+        . ' --writable'
+        . ' ' . escapeshellarg($item['command'])
+        . ($args ? ' ' . implode(' ', $args) : '')
+        . ' > /dev/null 2>&1 & echo $!';
+
+    $pid = (int)shell_exec($ttydCmd);
+
+    if (!$pid) {
+        http_response_code(500);
+        echo json_encode(['error' => 'Failed to start ttyd — is it installed?']);
+        exit;
+    }
+
+    file_put_contents(ttyd_pid_file($token), $pid);
+
+    // Poll until ttyd is listening (up to 3 s)
+    $ready = false;
+    for ($i = 0; $i < 30; $i++) {
+        usleep(100000);
+        $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
+        if ($sock) { fclose($sock); $ready = true; break; }
+    }
+
+    if (!$ready) {
+        posix_kill($pid, SIGKILL);
+        @unlink(ttyd_pid_file($token));
+        http_response_code(500);
+        echo json_encode(['error' => 'ttyd did not start in time']);
+        exit;
+    }
+
+    $authUser = function_exists('auth_user') ? auth_user() : 'anonymous';
+    $fullCmd  = $item['command'] . ($args ? ' ' . implode(' ', $args) : '');
+    openlog('clido', LOG_PID, LOG_USER);
+    syslog(LOG_INFO, "USER=$authUser ITEM=$itemName TTYD_PORT=$port CMD=$fullCmd");
+    closelog();
+
+    echo json_encode(['proxy_url' => $proxyUrl, 'pid_token' => $token]);
+    exit;
+}
+
+// ---------------------------------------------------------------------------
+// Action: ttyd_kill (POST — terminate a ttyd process by token)
+// ---------------------------------------------------------------------------
+
+function action_ttyd_kill(array $cfg): void {
+    $token = preg_replace('/[^a-f0-9]/', '', $_POST['token'] ?? '');
+    if (!$token) {
+        http_response_code(400);
+        echo json_encode(['error' => 'No token']);
+        exit;
+    }
+
+    $pidFile = ttyd_pid_file($token);
+
+    if (!file_exists($pidFile)) {
+        echo json_encode(['status' => 'not_running']);
+        exit;
+    }
+
+    $pid = (int)file_get_contents($pidFile);
+    if ($pid > 0) posix_kill($pid, SIGTERM);
+    @unlink($pidFile);
+
+    $authUser = function_exists('auth_user') ? auth_user() : 'anonymous';
+    openlog('clido', LOG_PID, LOG_USER);
+    syslog(LOG_INFO, "USER=$authUser ACTION=ttyd_kill TOKEN=$token PID=$pid");
+    closelog();
+
+    echo json_encode(['status' => 'killed', 'pid' => $pid]);
+    exit;
+}
+
+// ---------------------------------------------------------------------------
 // Action: check_refs (POST — reports which uploaded file dirs still exist)
 // ---------------------------------------------------------------------------
 
@@ -665,6 +795,12 @@ if ($action === 'exec') {
 } elseif ($action === 'check_refs') {
     header('Content-Type: application/json');
     action_check_refs();
+} elseif ($action === 'ttyd_start') {
+    header('Content-Type: application/json');
+    action_ttyd_start($cfg);
+} elseif ($action === 'ttyd_kill') {
+    header('Content-Type: application/json');
+    action_ttyd_kill($cfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -897,8 +1033,7 @@ html, body {
     color: var(--text-muted);
 }
 
-#btn-cancel {
-    background: var(--cancel);
+#btn-cancel, #btn-ttyd-kill {
     color: #fff;
     border: none;
     padding: 6px 18px;
@@ -908,7 +1043,9 @@ html, body {
     font-weight: 600;
     display: none;
 }
-#btn-cancel:hover { filter: brightness(1.15); }
+#btn-cancel    { background: var(--cancel); }
+#btn-ttyd-kill { background: #6e40c9; }
+#btn-cancel:hover, #btn-ttyd-kill:hover { filter: brightness(1.15); }
 
 /* ── Output ── */
 #output-wrap {
@@ -1420,6 +1557,7 @@ foreach ($cfg['groups'] as $entry) {
       <span id="toolbar-title" style="color:var(--text-muted)">Select an item from the menu</span>
       <span id="toolbar-desc"></span>
       <button id="btn-cancel">&#9632; CANCEL</button>
+      <button id="btn-ttyd-kill">&#9632; KILL SESSION</button>
     </div>
 
     <!-- Output area -->
@@ -1477,16 +1615,18 @@ const ITEMS = <?= js(array_map(function($i) {
         'inputs'       => $i['inputs'],
         'execute_text' => $i['execute_text'],
         'showfiles'    => $i['showfiles'],
+        'ttyd'         => $i['ttyd'],
     ];
 }, $cfg['items'])) ?>;
 
 const HISTORY_QTY = <?= (int)($g['history_qty']) ?>;
 
 // ── State ──
-let running     = false;
-let activeToken = null;
-let activeItem  = null;
-let eventSource = null;
+let running      = false;
+let activeToken  = null;
+let activeItem   = null;
+let eventSource  = null;
+const ttydSessions = {};  // item.name → { proxyUrl, pidToken }
 
 // ── Element refs ──
 const $menu          = document.getElementById('menu');
@@ -1500,6 +1640,7 @@ const $stats         = document.getElementById('stats');
 const $filesSection  = document.getElementById('files-section');
 const $fileList      = document.getElementById('file-list');
 const $btnCancel     = document.getElementById('btn-cancel');
+const $btnTtydKill   = document.getElementById('btn-ttyd-kill');
 const $btnClean      = document.getElementById('btn-clean');
 const $overlay       = document.getElementById('overlay');
 const $modal         = document.getElementById('modal');
@@ -1740,67 +1881,92 @@ function openItem(item) {
     $toolbar.textContent  = item.title;
     $toolbar.style.color  = 'var(--text)';
     $toolDesc.textContent = item.description || '';
+    $btnTtydKill.style.display = 'none';
 
     if (item.url) {
         showEmbed(item.url);
         return;
     }
 
-    // Leaving an embed — restore the output pane
+    if (item.ttyd) {
+        $stats.style.display        = 'none';
+        $filesSection.style.display = 'none';
+        if (ttydSessions[item.name]) {
+            // Resume existing session — just re-embed, no new process
+            showEmbed(ttydSessions[item.name].proxyUrl);
+            $btnTtydKill.style.display = 'inline-block';
+        } else {
+            $embed.style.display      = 'none';
+            $embed.innerHTML          = '';
+            $outputWrap.style.display = 'none';
+            if (Object.keys(item.inputs || {}).length === 0) {
+                launchTtyd(item, {});
+            } else {
+                openModalFor(item);
+            }
+        }
+        return;
+    }
+
+    // Command item — leaving an embed, restore the output pane
     $embed.style.display      = 'none';
     $embed.innerHTML          = '';
     $outputWrap.style.display = '';
 
-    const inputs = Object.entries(item.inputs || {});
-    if (inputs.length === 0) {
+    if (Object.keys(item.inputs || {}).length === 0) {
         startExec(item, {});
     } else {
-        $modalTitle.textContent = item.title;
-        $modalDesc.textContent  = item.description || '';
-        $btnExec.textContent    = item.execute_text || 'EXECUTE';
-        $modalFields.innerHTML  = '';
+        openModalFor(item);
+    }
+}
 
-        inputs.sort((a,b) => Number(a[0]) - Number(b[0])).forEach(([n, inp]) => {
-            const row = document.createElement('div');
-            const id  = `input_field_${n}`;
+function openModalFor(item) {
+    $modalTitle.textContent = item.title;
+    $modalDesc.textContent  = item.description || '';
+    $btnExec.textContent    = item.execute_text || 'EXECUTE';
+    $modalFields.innerHTML  = '';
 
-            if (inp.type === 'checkbox') {
-                row.className = 'form-row form-row-checkbox';
-                const chk = inp.default === 'checked' ? 'checked' : '';
-                row.innerHTML = `<label class="checkbox-label">
+    Object.entries(item.inputs || {}).sort((a,b) => Number(a[0]) - Number(b[0])).forEach(([n, inp]) => {
+        const row = document.createElement('div');
+        const id  = `input_field_${n}`;
+
+        if (inp.type === 'checkbox') {
+            row.className = 'form-row form-row-checkbox';
+            const chk = inp.default === 'checked' ? 'checked' : '';
+            row.innerHTML = `<label class="checkbox-label">
                     <input type="checkbox" id="${id}" name="input${n}" value="on" ${chk}>
                     <span>${escHtml(inp.desc || ('Option ' + n))}</span>
                 </label>`;
 
-            } else if (inp.type === 'radio') {
-                row.className = 'form-row';
-                let html = `<span class="field-label">${escHtml(inp.desc || ('Option ' + n))}</span>
+        } else if (inp.type === 'radio') {
+            row.className = 'form-row';
+            let html = `<span class="field-label">${escHtml(inp.desc || ('Option ' + n))}</span>
                     <div class="radio-group">`;
-                (inp.options || []).forEach(opt => {
-                    const chk = opt.value === inp.default ? 'checked' : '';
-                    html += `<label class="radio-label">
+            (inp.options || []).forEach(opt => {
+                const chk = opt.value === inp.default ? 'checked' : '';
+                html += `<label class="radio-label">
                         <input type="radio" name="input${n}" value="${escHtml(opt.value)}" ${chk}>
                         <span>${escHtml(opt.desc || opt.value)}</span>
                     </label>`;
-                });
-                html += `</div>`;
-                row.innerHTML = html;
+            });
+            html += `</div>`;
+            row.innerHTML = html;
 
-            } else if (inp.type === 'select') {
-                row.className = 'form-row';
-                let html = `<label for="${id}">${escHtml(inp.desc || ('Option ' + n))}</label>
+        } else if (inp.type === 'select') {
+            row.className = 'form-row';
+            let html = `<label for="${id}">${escHtml(inp.desc || ('Option ' + n))}</label>
                     <select id="${id}" name="input${n}">`;
-                (inp.options || []).forEach(opt => {
-                    const sel = opt.value === inp.default ? 'selected' : '';
-                    html += `<option value="${escHtml(opt.value)}" ${sel}>${escHtml(opt.desc || opt.value)}</option>`;
-                });
-                html += `</select>`;
-                row.innerHTML = html;
+            (inp.options || []).forEach(opt => {
+                const sel = opt.value === inp.default ? 'selected' : '';
+                html += `<option value="${escHtml(opt.value)}" ${sel}>${escHtml(opt.desc || opt.value)}</option>`;
+            });
+            html += `</select>`;
+            row.innerHTML = html;
 
-            } else if (['single_file', 'file_list', 'file_each'].includes(inp.type)) {
-                row.className = 'form-row';
-                const multi = inp.type !== 'single_file' ? 'multiple' : '';
-                row.innerHTML = `
+        } else if (['single_file', 'file_list', 'file_each'].includes(inp.type)) {
+            row.className = 'form-row';
+            const multi = inp.type !== 'single_file' ? 'multiple' : '';
+            row.innerHTML = `
                     <label>${escHtml(inp.desc || ('File ' + n))}</label>
                     <div class="file-drop-zone" data-slot="${n}">
                         <input type="file" class="file-input-hidden" name="file_input_${n}" ${multi} style="display:none" tabindex="-1">
@@ -1810,26 +1976,29 @@ function openItem(item) {
                     </div>
                 `;
 
-            } else {
-                // text (default)
-                row.className = 'form-row';
-                row.innerHTML = `
+        } else {
+            row.className = 'form-row';
+            row.innerHTML = `
                     <label for="${id}">${escHtml(inp.desc || ('Input ' + n))}</label>
                     <input type="text" id="${id}" name="input${n}" autocomplete="off">
                 `;
-            }
+        }
 
-            $modalFields.appendChild(row);
-        });
+        $modalFields.appendChild(row);
+    });
 
-        initDropZones();
+    initDropZones();
+
+    if (item.ttyd) {
+        $modalHistory.style.display = 'none';
+    } else {
         renderHistory(item, {});
         checkFileRefsAndUpdate(item);
-
-        $overlay.classList.add('open');
-        const first = $modalFields.querySelector('input[type="text"], input[type="checkbox"], input[type="radio"], select');
-        if (first) setTimeout(() => first.focus(), 50);
     }
+
+    $overlay.classList.add('open');
+    const first = $modalFields.querySelector('input[type="text"], input[type="checkbox"], input[type="radio"], select');
+    if (first) setTimeout(() => first.focus(), 50);
 }
 
 // ── Modal form submit ──
@@ -1848,7 +2017,11 @@ $modalForm.addEventListener('submit', e => {
     });
     const fileInputs = [...$modalForm.querySelectorAll('input[type="file"]')].filter(fi => fi.files.length > 0);
     $overlay.classList.remove('open');
-    startExec(activeItem, inputs, {}, fileInputs.length ? fileInputs : null);
+    if (activeItem && activeItem.ttyd) {
+        launchTtyd(activeItem, inputs);
+    } else {
+        startExec(activeItem, inputs, {}, fileInputs.length ? fileInputs : null);
+    }
 });
 
 document.getElementById('btn-modal-cancel').addEventListener('click', () => {
@@ -1950,6 +2123,72 @@ async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
         activeToken = null;
     });
 }
+
+// ── ttyd: launch terminal item ──
+async function launchTtyd(item, inputs) {
+    $outputWrap.style.display = 'none';
+    $embed.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-family:monospace">Launching terminal…</div>';
+    $embed.style.display = 'flex';
+
+    const formData = new FormData();
+    formData.append('action', 'ttyd_start');
+    formData.append('item', item.name);
+    for (const [k, v] of Object.entries(inputs)) formData.append(k, v);
+
+    try {
+        const res = await fetch(location.pathname, { method: 'POST', body: formData });
+        if (res.redirected || !res.headers.get('content-type')?.includes('json')) {
+            showTtydError('Session expired — please reload the page to log in again.');
+            return;
+        }
+        const json = await res.json();
+        if (json.error) throw new Error(json.error);
+        ttydSessions[item.name] = { proxyUrl: json.proxy_url, pidToken: json.pid_token };
+        showEmbed(json.proxy_url);
+        $btnTtydKill.style.display = 'inline-block';
+    } catch (err) {
+        showTtydError('Failed to start terminal: ' + err.message);
+    }
+}
+
+function showTtydError(msg) {
+    $embed.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ff7b72;font-family:monospace;padding:1em;text-align:center">${escHtml(msg)}</div>`;
+    $embed.style.display = 'flex';
+}
+
+// ── ttyd: kill session button ──
+$btnTtydKill.addEventListener('click', () => {
+    if (!activeItem) return;
+    const session = ttydSessions[activeItem.name];
+    if (!session) return;
+
+    const { pidToken } = session;
+    delete ttydSessions[activeItem.name];
+
+    $embed.style.display        = 'none';
+    $embed.innerHTML            = '';
+    $outputWrap.style.display   = '';
+    $welcome.style.display      = '';
+    $output.style.display       = 'none';
+    $output.innerHTML           = '';
+    $stats.style.display        = 'none';
+    $btnTtydKill.style.display  = 'none';
+
+    const fd = new FormData();
+    fd.append('action', 'ttyd_kill');
+    fd.append('token',  pidToken);
+    fetch(location.pathname, { method: 'POST', body: fd }).catch(() => {});
+});
+
+// ── ttyd: clean up all sessions on page unload ──
+window.addEventListener('beforeunload', () => {
+    for (const session of Object.values(ttydSessions)) {
+        const fd = new FormData();
+        fd.append('action', 'ttyd_kill');
+        fd.append('token',  session.pidToken);
+        navigator.sendBeacon(location.pathname, fd);
+    }
+});
 
 // ── Cancel ──
 $btnCancel.addEventListener('click', async () => {

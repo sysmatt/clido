@@ -58,6 +58,21 @@ location ~ \.php$ {
 }
 ```
 
+If you use **ttyd terminal items**, add a second nginx location to proxy WebSocket traffic through the same 443 connection. The port number is embedded in the URL path so one location block handles the whole pool:
+
+```nginx
+location ~ ^/ttyd/(?<ttyd_port>\d+)/ {
+    proxy_pass http://127.0.0.1:$ttyd_port/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 3600;
+}
+```
+
+The ttyd processes listen only on `127.0.0.1` and are never publicly exposed. A 32-character random token embedded in the URL path acts as the per-session auth secret.
+
 **Apache** — add to your VirtualHost or `.htaccess`:
 
 ```apache
@@ -93,6 +108,9 @@ INI key names are **case-insensitive** — `arg1`, `ARG1`, and `Arg1` are identi
 | `color_cancel` | `#da3633` | Cancel button color |
 | `color_output_bg` | `#010409` | Output pane background |
 | `color_output_text` | `#39d353` | Output pane text (terminal green by default) |
+| `ttyd_port_min` | `7681` | First port in the range reserved for ttyd terminal sessions |
+| `ttyd_port_max` | `7699` | Last port in the range (supports up to `max−min+1` concurrent sessions) |
+| `ttyd_bin` | `ttyd` | Path to the ttyd binary; set if ttyd is not on the web server's `PATH` |
 
 ### [group: NAME]
 
@@ -133,6 +151,7 @@ execute_text = RUN BACKUP
 | `show_command` | Override global `show_command` for this item |
 | `max_runtime` | Override global `max_runtime` for this item |
 | `showfiles` | `true` to list and offer download of files created in the temp dir |
+| `ttyd` | `true` to open the command in a full interactive terminal via ttyd instead of the SSE output pane |
 | `arg1`…`argN` | Fixed argument in this position |
 | `input1`…`inputN` | User-supplied argument; value = input type (see below) |
 | `desc1`…`descN` | Label shown next to the input field |
