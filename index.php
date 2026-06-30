@@ -668,10 +668,12 @@ function action_ttyd_start(array $cfg): void {
         exit;
     }
 
-    // 32-char random hex token embedded in the URL path — this is the auth secret
+    // 32-char random hex token embedded in the URL path — this is the auth secret.
+    // proxyUrl and basePath are the same: ttyd's --base-path must equal the full
+    // public path so its JS client constructs WebSocket URLs nginx can route.
     $token    = bin2hex(random_bytes(16));
-    $basePath = '/' . $token . '/';
-    $proxyUrl = '/ttyd/' . $port . $basePath;
+    $proxyUrl = '/ttyd/' . $port . '/' . $token . '/';
+    $basePath = $proxyUrl;
 
     $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
     $args       = assemble_args($item, $userInputs, '');  // empty tmpDir: file inputs emit nothing
