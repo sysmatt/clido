@@ -1089,6 +1089,24 @@ html, body {
     border: none;
     display: block;
 }
+#ttyd-pool {
+    flex: 1;
+    overflow: hidden;
+    padding-left: 3px;
+    position: relative;
+}
+.ttyd-frame {
+    display: none;
+    position: absolute;
+    inset: 0;
+}
+.ttyd-frame.active { display: block; }
+.ttyd-frame iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+}
 
 #output {
     flex: 1;
@@ -1593,6 +1611,7 @@ foreach ($cfg['groups'] as $entry) {
 
     <!-- Embedded URL pane -->
     <div id="embed" style="display:none"></div>
+    <div id="ttyd-pool" style="display:none"></div>
 
     <!-- Stats bar -->
     <div id="stats" style="display:none"></div>
@@ -1661,6 +1680,7 @@ const $welcome       = document.getElementById('welcome');
 const $stats         = document.getElementById('stats');
 const $filesSection  = document.getElementById('files-section');
 const $fileList      = document.getElementById('file-list');
+const $ttydPool      = document.getElementById('ttyd-pool');
 const $btnCancel     = document.getElementById('btn-cancel');
 const $btnTtydKill   = document.getElementById('btn-ttyd-kill');
 const $btnClean      = document.getElementById('btn-clean');
@@ -1888,11 +1908,27 @@ function showEmbed(url) {
     $outputWrap.style.display   = 'none';
     $stats.style.display        = 'none';
     $filesSection.style.display = 'none';
+    hideTtydPool();
     $embed.innerHTML = '';
     const iframe = document.createElement('iframe');
     iframe.src = url;
     $embed.appendChild(iframe);
     $embed.style.display = 'flex';
+}
+
+function hideTtydPool() {
+    $ttydPool.querySelectorAll('.ttyd-frame').forEach(f => f.classList.remove('active'));
+    $ttydPool.style.display = 'none';
+}
+
+function activateTtydFrame(itemName) {
+    $outputWrap.style.display   = 'none';
+    $stats.style.display        = 'none';
+    $filesSection.style.display = 'none';
+    $embed.style.display        = 'none';
+    $ttydPool.querySelectorAll('.ttyd-frame').forEach(f => f.classList.remove('active'));
+    $ttydPool.querySelector(`.ttyd-frame[data-item="${CSS.escape(itemName)}"]`)?.classList.add('active');
+    $ttydPool.style.display = 'flex';
 }
 
 function openItem(item) {
@@ -1914,10 +1950,11 @@ function openItem(item) {
         $stats.style.display        = 'none';
         $filesSection.style.display = 'none';
         if (ttydSessions[item.name]) {
-            // Resume existing session — just re-embed, no new process
-            showEmbed(ttydSessions[item.name].proxyUrl);
+            // Resume — show the persistent iframe (WebSocket and child process stay alive)
+            activateTtydFrame(item.name);
             $btnTtydKill.style.display = 'inline-block';
         } else {
+            hideTtydPool();
             $embed.style.display      = 'none';
             $embed.innerHTML          = '';
             $outputWrap.style.display = 'none';
@@ -1930,7 +1967,8 @@ function openItem(item) {
         return;
     }
 
-    // Command item — leaving an embed, restore the output pane
+    // Command / URL item — hide the ttyd pool and restore the output pane
+    hideTtydPool();
     $embed.style.display      = 'none';
     $embed.innerHTML          = '';
     $outputWrap.style.display = '';
@@ -2178,11 +2216,19 @@ async function launchTtyd(item, inputs) {
         }
         if (json.error) throw new Error(json.error);
         ttydSessions[item.name] = { proxyUrl: json.proxy_url, pidToken: json.pid_token };
-        showEmbed(json.proxy_url);
+        // Create a persistent frame in the pool — the iframe stays alive when switching items
+        const frame = document.createElement('div');
+        frame.className  = 'ttyd-frame';
+        frame.dataset.item = item.name;
+        const ifrm = document.createElement('iframe');
+        ifrm.src = json.proxy_url;
+        frame.appendChild(ifrm);
+        $ttydPool.appendChild(frame);
+        activateTtydFrame(item.name);
+        $embed.style.display = 'none';
+        $embed.innerHTML     = '';
         $btnTtydKill.style.display = 'inline-block';
-        // Nudge xterm.js to recalculate terminal size once the iframe is painted
-        const ifrm = $embed.querySelector('iframe');
-        if (ifrm) ifrm.addEventListener('load', () => {
+        ifrm.addEventListener('load', () => {
             try { ifrm.contentWindow.dispatchEvent(new Event('resize')); } catch (_) {}
         }, { once: true });
     } catch (err) {
@@ -2204,8 +2250,9 @@ $btnTtydKill.addEventListener('click', () => {
     const { pidToken } = session;
     delete ttydSessions[activeItem.name];
 
-    $embed.style.display        = 'none';
-    $embed.innerHTML            = '';
+    const deadFrame = $ttydPool.querySelector(`.ttyd-frame[data-item="${CSS.escape(activeItem.name)}"]`);
+    if (deadFrame) deadFrame.remove();
+    hideTtydPool();
     $outputWrap.style.display   = '';
     $welcome.style.display      = '';
     $output.style.display       = 'none';
