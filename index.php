@@ -678,15 +678,25 @@ function action_ttyd_start(array $cfg): void {
     $userInputs = array_filter($_POST, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
     $args       = assemble_args($item, $userInputs, '');  // empty tmpDir: file inputs emit nothing
 
+    // Split command field into separate tokens so ttyd receives each word as its own
+    // argv element — escapeshellarg-ing the whole string as one arg causes ttyd to exec
+    // a binary whose filename contains spaces, which fails or adds an unwanted shell layer.
+    $cmdTokens   = preg_split('/\s+/', trim($item['command']));
+    $cmdForShell = implode(' ', array_map('escapeshellarg', $cmdTokens));
+
     $ttydBin = escapeshellarg($cfg['global']['ttyd_bin'] ?? 'ttyd');
     $ttydLog = sys_get_temp_dir() . '/clido_ttyd_' . $token . '.log';
-    $ttydCmd = 'nohup ' . $ttydBin
+    // setsid: new session → no inherited controlling terminal from PHP-FPM, and SIGHUP
+    // stays at default so ttyd can actually signal children when the client disconnects.
+    // nohup would set SIG_IGN which propagates through fork+exec and orphans processes.
+    // </dev/null: clean stdin, not the FPM worker's FastCGI socket.
+    $ttydCmd = 'setsid ' . $ttydBin
         . ' --port ' . (int)$port
         . ' --base-path ' . escapeshellarg($basePath)
         . ' --writable'
-        . ' ' . escapeshellarg($item['command'])
+        . ' ' . $cmdForShell
         . ($args ? ' ' . implode(' ', $args) : '')
-        . ' > ' . escapeshellarg($ttydLog) . ' 2>&1 & echo $!';
+        . ' </dev/null > ' . escapeshellarg($ttydLog) . ' 2>&1 & echo $!';
 
     $pid = (int)shell_exec($ttydCmd);
 
@@ -2170,6 +2180,11 @@ async function launchTtyd(item, inputs) {
         ttydSessions[item.name] = { proxyUrl: json.proxy_url, pidToken: json.pid_token };
         showEmbed(json.proxy_url);
         $btnTtydKill.style.display = 'inline-block';
+        // Nudge xterm.js to recalculate terminal size once the iframe is painted
+        const ifrm = $embed.querySelector('iframe');
+        if (ifrm) ifrm.addEventListener('load', () => {
+            try { ifrm.contentWindow.dispatchEvent(new Event('resize')); } catch (_) {}
+        }, { once: true });
     } catch (err) {
         showTtydError('Failed to start terminal: ' + err.message);
     }
