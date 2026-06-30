@@ -10,6 +10,11 @@
 
 define('CLIDO_VERSION', '1.0.0');
 
+// SIGTERM/SIGKILL are defined by the pcntl extension, which is often absent on
+// web-server PHP. Define them from their POSIX-standard values if not already set.
+defined('SIGTERM') || define('SIGTERM', 15);
+defined('SIGKILL') || define('SIGKILL',  9);
+
 // The "working directory" for this deployment is wherever the symlink lives,
 // not where this file actually is. SCRIPT_FILENAME is set by the web server
 // to the path it's serving (pre-symlink-resolution on most configs).
