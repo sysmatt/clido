@@ -2136,12 +2136,24 @@ async function launchTtyd(item, inputs) {
     for (const [k, v] of Object.entries(inputs)) formData.append(k, v);
 
     try {
-        const res = await fetch(location.pathname, { method: 'POST', body: formData });
-        if (res.redirected || !res.headers.get('content-type')?.includes('json')) {
+        const res  = await fetch(location.pathname, { method: 'POST', body: formData });
+        if (res.redirected) {
             showTtydError('Session expired — please reload the page to log in again.');
             return;
         }
-        const json = await res.json();
+        const raw = await res.text();
+        if (!raw.trim()) {
+            showTtydError('Server returned an empty response (HTTP ' + res.status + '). Check the PHP / web server error log.');
+            console.error('[clido] ttyd_start: empty response body, HTTP', res.status);
+            return;
+        }
+        let json;
+        try { json = JSON.parse(raw); }
+        catch {
+            showTtydError('Server returned a non-JSON response (HTTP ' + res.status + '). Check the PHP error log.');
+            console.error('[clido] ttyd_start raw response:', raw.slice(0, 500));
+            return;
+        }
         if (json.error) throw new Error(json.error);
         ttydSessions[item.name] = { proxyUrl: json.proxy_url, pidToken: json.pid_token };
         showEmbed(json.proxy_url);
