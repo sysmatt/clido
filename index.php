@@ -677,39 +677,44 @@ function action_ttyd_start(array $cfg): void {
     $args       = assemble_args($item, $userInputs, '');  // empty tmpDir: file inputs emit nothing
 
     $ttydBin = escapeshellarg($cfg['global']['ttyd_bin'] ?? 'ttyd');
+    $ttydLog = sys_get_temp_dir() . '/clido_ttyd_' . $token . '.log';
     $ttydCmd = 'nohup ' . $ttydBin
         . ' --port ' . (int)$port
         . ' --base-path ' . escapeshellarg($basePath)
         . ' --writable'
         . ' ' . escapeshellarg($item['command'])
         . ($args ? ' ' . implode(' ', $args) : '')
-        . ' > /dev/null 2>&1 & echo $!';
+        . ' > ' . escapeshellarg($ttydLog) . ' 2>&1 & echo $!';
 
     $pid = (int)shell_exec($ttydCmd);
 
     if (!$pid) {
         http_response_code(500);
-        echo json_encode(['error' => 'Failed to start ttyd — is it installed?']);
+        echo json_encode(['error' => 'Failed to start ttyd — is it installed and on PATH?']);
         exit;
     }
 
     file_put_contents(ttyd_pid_file($token), $pid);
 
-    // Poll until ttyd is listening (up to 3 s)
+    // Poll until ttyd is listening (up to 5 s)
     $ready = false;
-    for ($i = 0; $i < 30; $i++) {
+    for ($i = 0; $i < 50; $i++) {
         usleep(100000);
         $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
         if ($sock) { fclose($sock); $ready = true; break; }
     }
 
     if (!$ready) {
+        $ttydOutput = trim(@file_get_contents($ttydLog) ?: '(no output captured)');
+        @unlink($ttydLog);
         posix_kill($pid, SIGKILL);
         @unlink(ttyd_pid_file($token));
         http_response_code(500);
-        echo json_encode(['error' => 'ttyd did not start in time']);
+        echo json_encode(['error' => 'ttyd did not start in time. Output: ' . $ttydOutput]);
         exit;
     }
+
+    @unlink($ttydLog);
 
     $authUser = function_exists('auth_user') ? auth_user() : 'anonymous';
     $fullCmd  = $item['command'] . ($args ? ' ' . implode(' ', $args) : '');
