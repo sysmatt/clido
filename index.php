@@ -244,6 +244,13 @@ function job_dir_file(string $token): string {
     return sys_get_temp_dir() . "/clido_dir_$token";
 }
 
+// H4: verify a path is within the expected clido temp prefix before any delete/read
+function is_safe_tmpdir(string $dir): bool {
+    $real     = realpath($dir);
+    $expected = rtrim(sys_get_temp_dir(), '/') . '/clido_';
+    return $real !== false && str_starts_with($real, $expected);
+}
+
 // ---------------------------------------------------------------------------
 // Action: exec (POST — starts command, returns token)
 // ---------------------------------------------------------------------------
@@ -566,7 +573,12 @@ function action_download(array $cfg): void {
     }
 
     $tmpDir   = trim(file_get_contents($dirFile));
-    // Path traversal prevention: resolve and verify it's inside the tmpDir
+    // H4: confirm tmpDir itself is within the expected clido temp prefix
+    if (!is_safe_tmpdir($tmpDir)) {
+        http_response_code(403);
+        exit;
+    }
+    // Path traversal prevention: resolve and verify requested file is inside the tmpDir
     $realDir  = realpath($tmpDir);
     $realFile = realpath($tmpDir . '/' . $filename);
 
@@ -582,7 +594,8 @@ function action_download(array $cfg): void {
 
     $mime = mime_content_type($realFile) ?: 'application/octet-stream';
     header('Content-Type: ' . $mime);
-    header('Content-Disposition: attachment; filename="' . addslashes(basename($realFile)) . '"');
+    // H2: RFC 5987 encoding — rawurlencode handles CR/LF and all other special chars
+    header("Content-Disposition: attachment; filename*=UTF-8''" . rawurlencode(basename($realFile)));
     header('Content-Length: ' . filesize($realFile));
     readfile($realFile);
     exit;
@@ -609,7 +622,7 @@ function action_clean(array $cfg): void {
     }
 
     $tmpDir = trim(file_get_contents($dirFile));
-    if ($tmpDir && is_dir($tmpDir)) {
+    if ($tmpDir && is_dir($tmpDir) && is_safe_tmpdir($tmpDir)) {
         clido_rmdir($tmpDir);
     }
     @unlink($dirFile);
