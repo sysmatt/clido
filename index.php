@@ -251,11 +251,30 @@ function is_safe_tmpdir(string $dir): bool {
     return $real !== false && str_starts_with($real, $expected);
 }
 
+// H3: CSRF — generate once per session, verify on every state-changing POST
+function clido_csrf_setup(): string {
+    if (session_status() === PHP_SESSION_NONE) session_start();
+    if (empty($_SESSION['clido_csrf'])) {
+        $_SESSION['clido_csrf'] = bin2hex(random_bytes(16));
+    }
+    return $_SESSION['clido_csrf'];
+}
+
+function verify_csrf(): void {
+    $tok = $_POST['_csrf'] ?? '';
+    if (empty($_SESSION['clido_csrf']) || !hash_equals($_SESSION['clido_csrf'], $tok)) {
+        http_response_code(403);
+        echo json_encode(['error' => 'CSRF validation failed']);
+        exit;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Action: exec (POST — starts command, returns token)
 // ---------------------------------------------------------------------------
 
 function action_exec(array $cfg): void {
+    verify_csrf();
     $itemName = $_POST['item'] ?? '';
     $item     = $cfg['items'][$itemName] ?? null;
     if (!$item) {
@@ -514,6 +533,7 @@ function action_stream(array $cfg): void {
 // ---------------------------------------------------------------------------
 
 function action_cancel(array $cfg): void {
+    verify_csrf();
     $token = preg_replace('/[^a-f0-9]/', '', $_POST['token'] ?? '');
     if (!$token) {
         http_response_code(400);
@@ -606,6 +626,7 @@ function action_download(array $cfg): void {
 // ---------------------------------------------------------------------------
 
 function action_clean(array $cfg): void {
+    verify_csrf();
     $token = preg_replace('/[^a-f0-9]/', '', $_POST['token'] ?? '');
     if (!$token) {
         http_response_code(400);
@@ -662,6 +683,7 @@ function ttyd_find_free_port(int $min, int $max): int|false {
 // ---------------------------------------------------------------------------
 
 function action_ttyd_start(array $cfg): void {
+    verify_csrf();
     $itemName = $_POST['item'] ?? '';
     $item     = $cfg['items'][$itemName] ?? null;
 
@@ -756,6 +778,7 @@ function action_ttyd_start(array $cfg): void {
 // ---------------------------------------------------------------------------
 
 function action_ttyd_kill(array $cfg): void {
+    verify_csrf();
     $token = preg_replace('/[^a-f0-9]/', '', $_POST['token'] ?? '');
     if (!$token) {
         http_response_code(400);
@@ -788,6 +811,7 @@ function action_ttyd_kill(array $cfg): void {
 // ---------------------------------------------------------------------------
 
 function action_check_refs(): void {
+    verify_csrf();
     $dirs    = (array)($_POST['dirs'] ?? []);
     $tmpBase = rtrim(sys_get_temp_dir(), '/') . '/clido_';
     $result  = [];
@@ -811,6 +835,7 @@ $global = $cfg['global'];
 
 // Auth must happen before any output
 clido_auth($global);
+$csrfToken = clido_csrf_setup();
 
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
@@ -1659,6 +1684,9 @@ foreach ($cfg['groups'] as $entry) {
 </div>
 
 <script>
+const CSRF_TOKEN = <?= json_encode($csrfToken) ?>;
+// Pre-load a new FormData with the CSRF token
+function csrfFd() { const f = new FormData(); f.append('_csrf', CSRF_TOKEN); return f; }
 // ── Item definitions (server-side rendered) ──
 const ITEMS = <?= js(array_map(function($i) {
     return [
@@ -1862,7 +1890,7 @@ async function checkFileRefsAndUpdate(item) {
     });
     if (!dirs.size) return;
 
-    const fd = new FormData();
+    const fd = csrfFd();
     [...dirs].forEach(d => fd.append('dirs[]', d));
     try {
         const res = await fetch(`${location.pathname}?action=check_refs`, { method: 'POST', body: fd });
@@ -2126,7 +2154,7 @@ async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
     if (hasUploads) appendOutput('[clido] Uploading files…', 'stderr');
     else if (hasRefs) appendOutput('[clido] Preparing files from previous run…', 'stderr');
 
-    const formData = new FormData();
+    const formData = csrfFd();
     formData.append('action', 'exec');
     formData.append('item', item.name);
     for (const [k, v] of Object.entries(inputs)) formData.append(k, v);
@@ -2203,7 +2231,7 @@ async function launchTtyd(item, inputs) {
     $embed.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-family:monospace">Launching terminal…</div>';
     $embed.style.display = 'flex';
 
-    const formData = new FormData();
+    const formData = csrfFd();
     formData.append('action', 'ttyd_start');
     formData.append('item', item.name);
     for (const [k, v] of Object.entries(inputs)) formData.append(k, v);
@@ -2273,7 +2301,7 @@ $btnTtydKill.addEventListener('click', () => {
     $stats.style.display        = 'none';
     $btnTtydKill.style.display  = 'none';
 
-    const fd = new FormData();
+    const fd = csrfFd();
     fd.append('action', 'ttyd_kill');
     fd.append('token',  pidToken);
     fetch(location.pathname, { method: 'POST', body: fd }).catch(() => {});
@@ -2282,7 +2310,7 @@ $btnTtydKill.addEventListener('click', () => {
 // ── ttyd: clean up all sessions on page unload ──
 window.addEventListener('beforeunload', () => {
     for (const session of Object.values(ttydSessions)) {
-        const fd = new FormData();
+        const fd = csrfFd();
         fd.append('action', 'ttyd_kill');
         fd.append('token',  session.pidToken);
         navigator.sendBeacon(location.pathname, fd);
@@ -2293,7 +2321,7 @@ window.addEventListener('beforeunload', () => {
 $btnCancel.addEventListener('click', async () => {
     if (!activeToken) return;
     const tok = activeToken;
-    const fd  = new FormData();
+    const fd  = csrfFd();
     fd.append('action', 'cancel');
     fd.append('token',  tok);
 
@@ -2310,7 +2338,7 @@ $btnCancel.addEventListener('click', async () => {
 $btnClean.addEventListener('click', async () => {
     const tok = $btnClean.dataset.token;
     if (!tok) return;
-    const fd = new FormData();
+    const fd = csrfFd();
     fd.append('action', 'clean');
     fd.append('token',  tok);
     await fetch(location.pathname, { method: 'POST', body: fd });
