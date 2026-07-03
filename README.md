@@ -22,9 +22,10 @@ Clone once, deploy many times via symlinks. Each deployment reads its own `clido
 
 ## Requirements
 
-- PHP 8.0+
-- [simplewebauth](https://github.com/sysmatt/simplewebauth) for session authentication
+- PHP 8.0+ with the POSIX extension (`ext-posix`, bundled by default on most Linux distros) — used to signal running commands on cancel
+- [simplewebauth](https://github.com/sysmatt/simplewebauth) for session authentication — optional; omit `simplewebauth` in `[global]` to run without auth (local/trusted-network deployments only)
 - Web server with PHP-FPM (Apache or nginx); output buffering must be disabled for SSE streaming
+- [ttyd](https://github.com/tsl0922/ttyd) (`apt install ttyd`) — only needed if you use `ttyd = true` items
 
 ## Setup
 
@@ -83,6 +84,15 @@ php_value output_buffering Off
 
 INI key names are **case-insensitive** — `arg1`, `ARG1`, and `Arg1` are identical. Lowercase is the convention used throughout this documentation and the example file.
 
+### Section names
+
+`[group: NAME]` and `[item: NAME]` section names must be unique — a repeated name silently overwrites the earlier section, since PHP's INI parser keys sections by name. `NAME` can contain spaces, digits, and most punctuation without quoting (e.g. `[item: Traceroute to 1.1.1.1]`) — just avoid:
+
+- `]` in the name — it closes the section header early.
+- `;` in the name — the INI parser treats it as a comment starter and truncates the rest of the line.
+
+`title` is optional on both groups and items; if omitted, the section `NAME` is used as the display title.
+
 ### [global]
 
 | Key | Default | Description |
@@ -91,7 +101,7 @@ INI key names are **case-insensitive** — `arg1`, `ARG1`, and `Arg1` are identi
 | `favicon` | _(none)_ | URL to favicon |
 | `logo` | _(none)_ | URL to logo image shown above the menu |
 | `execute_text` | `EXECUTE` | Default label for the run button; overridable per item |
-| `simplewebauth` | _(required)_ | Absolute or docroot-relative path to `simplewebauth/auth.php` |
+| `simplewebauth` | _(none)_ | Absolute or docroot-relative path to `simplewebauth/auth.php`; omit to disable authentication |
 | `logout_url` | _(none)_ | URL for the sign-out link shown next to the logged-in username |
 | `history_qty` | `5` | Previous input sets remembered per item in localStorage; `0` disables history |
 | `show_command` | `false` | Prepend the full assembled command to output (magenta label, white text); overridable per item |
@@ -114,16 +124,18 @@ INI key names are **case-insensitive** — `arg1`, `ARG1`, and `Arg1` are identi
 
 ### [group: NAME]
 
-Groups provide section headers in the left menu. Items that follow a group header appear under it until the next group.
+Groups provide collapsible section headers in the left menu. Items that follow a group header appear under it until the next group. Clicking a group header toggles it collapsed/expanded; opening an item inside a collapsed group auto-expands it. Collapse state is not persisted — each page load starts from `collapsed` in the ini.
 
 ```ini
 [group: DevOps]
-title = DevOps Tools
+title     = DevOps Tools
+collapsed = true
 ```
 
 | Key | Description |
 |-----|-------------|
-| `title` | Display label for the group header |
+| `title` | Display label for the group header (defaults to `NAME` if omitted) |
+| `collapsed` | `true` to start this group collapsed (default `false`) |
 
 ### [item: NAME] — command items
 
@@ -144,7 +156,7 @@ execute_text = RUN BACKUP
 
 | Key | Description |
 |-----|-------------|
-| `title` | Menu entry text |
+| `title` | Menu entry text (defaults to `NAME` if omitted) |
 | `description` | Tooltip shown on hover |
 | `command` | Executable to run (full path recommended) |
 | `execute_text` | Override the global execute button label for this item |
@@ -244,7 +256,7 @@ url         = https://portainer.internal:9000
 
 | Key | Description |
 |-----|-------------|
-| `title` | Menu entry text |
+| `title` | Menu entry text (defaults to `NAME` if omitted) |
 | `description` | Tooltip shown on hover |
 | `url` | URL to embed; omit `command` entirely |
 
@@ -252,7 +264,7 @@ url         = https://portainer.internal:9000
 
 ## UI
 
-- **Left pane**: scrollable menu of groups and items; URL items show a `↗` pop-out icon on hover to open in a new tab
+- **Left pane**: scrollable menu of collapsible groups and items; click a group header to toggle it; URL items show a `↗` pop-out icon on hover to open in a new tab
 - **Right pane**: live command output with a terminal-style monospace display, or an embedded site for URL items
 - **Input modal**: appears for command items with any `inputN` defined; shows input fields (text, checkbox, radio, select, or file upload drop zones), the execute button, and a "Previous runs" history table with per-row re-run, pre-fill, and delete buttons
 - **While running**: all menu items are disabled; a Cancel button is shown (sends SIGTERM, then SIGKILL after `sigkill_wait` seconds)
@@ -266,11 +278,12 @@ Set `logout_url` to point at `simplewebauth/logout.php` to show a sign-out link 
 
 ## Audit logging
 
-All command executions are logged to syslog with: username, item name, full assembled command, exit code, and elapsed time.
+All command executions are logged to syslog with: username, item name, full assembled command, exit code, and elapsed time. Cancellations and ttyd session start/kill are logged separately with username, item name, and process ID.
 
 ## Security notes
 
 - `clido.ini` is served by the web server — do not put secrets in it.
+- All state-changing requests (run, cancel, clean, ttyd start/kill) require a per-session CSRF token issued on page load.
 - All user input is passed through `escapeshellarg()` before being added to the command line.
 - Commands run as the web server user. Grant only the permissions that user needs.
 - Temp directories are created under `sys_get_temp_dir()` with a random token; each execution gets its own isolated directory.

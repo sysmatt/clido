@@ -72,6 +72,8 @@ function clido_parse_ini(): array {
 
         if (preg_match('/^group:\s*(.+)$/i', $section, $m)) {
             $name = trim($m[1]);
+            $cfg['title']     = $cfg['title'] ?? $name;
+            $cfg['collapsed'] = filter_var($cfg['collapsed'] ?? false, FILTER_VALIDATE_BOOLEAN);
             $groups[] = ['type' => 'group', 'name' => $name, 'cfg' => $cfg];
         } elseif (preg_match('/^item:\s*(.+)$/i', $section, $m)) {
             $name = trim($m[1]);
@@ -977,6 +979,9 @@ html, body {
 }
 
 .menu-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 14px 14px 4px;
     font-size: 0.7em;
     font-weight: 700;
@@ -984,6 +989,22 @@ html, body {
     letter-spacing: 0.08em;
     color: var(--text-muted);
     user-select: none;
+    cursor: pointer;
+}
+
+.menu-group-chevron {
+    display: inline-block;
+    font-size: 1.15em;
+    line-height: 1;
+    transition: transform 0.15s;
+}
+
+.menu-group.collapsed .menu-group-chevron {
+    transform: rotate(-90deg);
+}
+
+.menu-group.collapsed .menu-group-body {
+    display: none;
 }
 
 .menu-item {
@@ -1599,11 +1620,19 @@ html, body {
 
     <div id="menu">
 <?php
-$inGroup = false;
+$groupOpen = false;
 foreach ($cfg['groups'] as $entry) {
     if ($entry['type'] === 'group') {
-        $inGroup = true;
-        echo '<div class="menu-group-header">' . h($entry['cfg']['title'] ?? $entry['name']) . '</div>';
+        if ($groupOpen) echo "</div></div>\n";
+        $gcfg      = $entry['cfg'];
+        $collapsed = $gcfg['collapsed'];
+        echo '<div class="menu-group' . ($collapsed ? ' collapsed' : '') . '">';
+        echo '<div class="menu-group-header" role="button" tabindex="0" aria-expanded="' . ($collapsed ? 'false' : 'true') . '">';
+        echo '<span class="menu-group-title">' . h($gcfg['title']) . '</span>';
+        echo '<span class="menu-group-chevron">&#9662;</span>';
+        echo '</div>';
+        echo '<div class="menu-group-body">';
+        $groupOpen = true;
     } elseif ($entry['type'] === 'item') {
         $item   = $entry['cfg'];
         $title  = h($item['title']);
@@ -1619,6 +1648,7 @@ foreach ($cfg['groups'] as $entry) {
         }
     }
 }
+if ($groupOpen) echo "</div></div>\n";
 ?>
     </div>
 
@@ -1936,13 +1966,33 @@ function updateFilePreview(preview, files) {
 }
 
 // ── Menu click handler ──
+function toggleGroup(header) {
+    const group     = header.closest('.menu-group');
+    const collapsed = group.classList.toggle('collapsed');
+    header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
 $menu.addEventListener('click', e => {
+    const header = e.target.closest('.menu-group-header');
+    if (header) {
+        toggleGroup(header);
+        return;
+    }
     const btn = e.target.closest('.menu-item');
     if (!btn || running) return;
     const name = btn.dataset.item;
     const item = ITEMS[name];
     if (!item) return;
     openItem(item);
+});
+
+$menu.addEventListener('keydown', e => {
+    const header = e.target.closest('.menu-group-header');
+    if (!header) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleGroup(header);
+    }
 });
 
 function showEmbed(url) {
@@ -1975,7 +2025,13 @@ function activateTtydFrame(itemName) {
 function openItem(item) {
     activeItem = item;
     document.querySelectorAll('.menu-item').forEach(b => b.classList.remove('active'));
-    document.querySelector(`.menu-item[data-item="${CSS.escape(item.name)}"]`)?.classList.add('active');
+    const menuBtn = document.querySelector(`.menu-item[data-item="${CSS.escape(item.name)}"]`);
+    menuBtn?.classList.add('active');
+    const group = menuBtn?.closest('.menu-group');
+    if (group && group.classList.contains('collapsed')) {
+        group.classList.remove('collapsed');
+        group.querySelector('.menu-group-header')?.setAttribute('aria-expanded', 'true');
+    }
 
     $toolbar.textContent  = item.title;
     $toolbar.style.color  = 'var(--text)';

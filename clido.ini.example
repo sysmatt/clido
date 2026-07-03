@@ -57,6 +57,9 @@ sigkill_wait  = 5
 ; ──────────────────────────────────────────────────────────────────────────────
 ; Groups provide section headers in the left menu.
 ; Items that follow a group appear under that group's header.
+; title=      is optional — defaults to the section name (e.g. "System" below).
+; collapsed=  true/false — whether the group starts collapsed (default false).
+;             Users can still click the group header to expand/collapse either way.
 ; ──────────────────────────────────────────────────────────────────────────────
 
 [group: System]
@@ -129,7 +132,8 @@ execute_text  = RESOLVE
 
 
 [group: Reports]
-title = Reports
+title     = Reports
+collapsed = true
 
 [item: generate_report]
 title         = Generate Report
