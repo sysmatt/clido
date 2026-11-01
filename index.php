@@ -46,6 +46,16 @@ $DEFAULTS = [
     'ttyd_port_min'    => 7681,
     'ttyd_port_max'    => 7699,
     'ttyd_bin'         => 'ttyd',
+    // Base URL for xterm.js (terminal items). Self-host by mirroring the same
+    // package paths, e.g. <base>/@xterm/xterm@6.0.0/lib/xterm.js
+    'xterm_base'       => 'https://cdn.jsdelivr.net/npm',
+];
+
+// Pinned xterm.js assets for terminal items — path relative to xterm_base => SRI hash
+const XTERM_ASSETS = [
+    'css' => ['@xterm/xterm@6.0.0/css/xterm.css',        'sha384-n2n7twoohnW+d3myBKaUgl7DSiwidw6MkQy9oesGzkPpMjejKRR3XlnD+5yCdtBD'],
+    'js'  => ['@xterm/xterm@6.0.0/lib/xterm.js',         'sha384-f/1U6Z9wM4D71a5eRXEZnyOTMOvjqxr2XLwh+Go1OvIl3L3tOcvUrzudnhbECwl4'],
+    'fit' => ['@xterm/addon-fit@0.11.0/lib/addon-fit.js', 'sha384-txoiwu4RR2GD3qySbaj+BbzibkLbSJRcfqGYMu6z1EqHil4A2dyBiBW5dlacG6OR'],
 ];
 
 // ---------------------------------------------------------------------------
@@ -96,6 +106,7 @@ function build_item(string $name, array $cfg, array $global): array {
         'execute_text' => $cfg['execute_text']  ?? $global['execute_text'],
         'showfiles'    => filter_var($cfg['showfiles']    ?? false,                    FILTER_VALIDATE_BOOLEAN),
         'ttyd'         => filter_var($cfg['ttyd']         ?? false,                    FILTER_VALIDATE_BOOLEAN),
+        'terminal'     => filter_var($cfg['terminal']     ?? false,                    FILTER_VALIDATE_BOOLEAN),
         'show_command' => filter_var($cfg['show_command'] ?? $global['show_command'],  FILTER_VALIDATE_BOOLEAN),
         'max_runtime'  => (int)($cfg['max_runtime'] ?? $global['max_runtime']),
         'args'         => [],   // fixed-prefix args for text slots only
@@ -378,6 +389,10 @@ function action_stream(array $cfg): void {
         exit;
     }
 
+    // Release the session lock: this request lives as long as the command, and
+    // holding the lock would block cancel (and every other request) until it exits.
+    if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+
     $userInputs = array_filter($_GET, fn($k) => (bool)preg_match('/^input\d+$/', $k), ARRAY_FILTER_USE_KEY);
     $args       = assemble_args($item, $userInputs, $tmpDir);
     $command    = $item['command'];
@@ -385,6 +400,29 @@ function action_stream(array $cfg): void {
 
     $maxRuntime  = $item['max_runtime'];
     $sigkillWait = (int)($cfg['global']['sigkill_wait'] ?? 5);
+
+    // Every command runs as a new session / process-group leader (setsid -w, which
+    // waits and passes the exit code through) so cancel, max_runtime and disconnect
+    // can signal the whole group with kill(-pid).
+    //
+    // Terminal items additionally run under a pseudo-terminal (util-linux `script`) so
+    // tools emit color and cursor control; the browser renders the raw stream with
+    // xterm.js. When `script` dies the pty closes and the command receives SIGHUP.
+    $terminal = $item['terminal'];
+    if ($terminal) {
+        $cols   = max(20, min(500, (int)($_GET['cols'] ?? 120)));
+        $rows   = max(5,  min(200, (int)($_GET['rows'] ?? 40)));
+        $inner  = "stty cols $cols rows $rows 2>/dev/null; " . $fullCmd;
+        $runCmd = 'exec setsid -w env SHELL=/bin/sh TERM=xterm-256color COLORTERM=truecolor PAGER=cat'
+                . ' script -qefc ' . escapeshellarg($inner) . ' /dev/null';
+    } else {
+        $runCmd = 'exec setsid -w /bin/sh -c ' . escapeshellarg($fullCmd);
+    }
+
+    // Keep running when the browser goes away so the loop below can notice via
+    // connection_aborted() and kill the command (PHP would otherwise just stop
+    // this script at the next failed write and leave the command running).
+    ignore_user_abort(true);
 
     // SSE headers
     header('Content-Type: text/event-stream');
@@ -404,6 +442,14 @@ function action_stream(array $cfg): void {
         }
         echo "\n";
         flush();
+        $GLOBALS['clido_sse_last'] = microtime(true);
+    }
+
+    // Command output is sent base64-encoded: raw bytes may contain a bare CR (which
+    // SSE treats as a line break, silently dropping data) or a UTF-8 sequence split
+    // across reads. The browser decodes it statefully.
+    function sse_bytes(string $event, string|false $bytes): void {
+        if ($bytes !== false && $bytes !== '') sse($event, base64_encode($bytes));
     }
 
     $startTime = microtime(true);
@@ -418,7 +464,7 @@ function action_stream(array $cfg): void {
         sse('command', $fullCmd);
     }
 
-    $proc = proc_open($fullCmd, $descriptors, $pipes, $tmpDir, null, ['bypass_shell' => false]);
+    $proc = proc_open($runCmd, $descriptors, $pipes, $tmpDir, null, ['bypass_shell' => false]);
 
     if (!is_resource($proc)) {
         sse('error', 'Failed to start process');
@@ -436,7 +482,17 @@ function action_stream(array $cfg): void {
 
     $timedOut = false;
 
+    $outEvent = $terminal ? 'term' : 'output';
+
     while (true) {
+        // Heartbeat: PHP only learns the client is gone when a write fails, so a
+        // command that prints nothing would otherwise outlive a closed tab forever.
+        if (microtime(true) - ($GLOBALS['clido_sse_last'] ?? 0) > 5) {
+            echo ": ping\n\n";
+            flush();
+            $GLOBALS['clido_sse_last'] = microtime(true);
+        }
+
         if (connection_aborted()) {
             // Client disconnected — kill and clean up
             posix_kill(-$pid, SIGTERM);
@@ -457,22 +513,13 @@ function action_stream(array $cfg): void {
             posix_kill(-$pid, SIGKILL);
         }
 
-        $out = stream_get_contents($pipes[1]);
-        $err = stream_get_contents($pipes[2]);
-
-        if ($out !== false && $out !== '') {
-            sse('output', $out);
-        }
-        if ($err !== false && $err !== '') {
-            sse('stderr', $err);
-        }
+        sse_bytes($outEvent, stream_get_contents($pipes[1]));
+        sse_bytes('stderr',  stream_get_contents($pipes[2]));
 
         if (!$status['running']) {
             // Drain any remaining output
-            $out = stream_get_contents($pipes[1]);
-            $err = stream_get_contents($pipes[2]);
-            if ($out) sse('output', $out);
-            if ($err) sse('stderr', $err);
+            sse_bytes($outEvent, stream_get_contents($pipes[1]));
+            sse_bytes('stderr',  stream_get_contents($pipes[2]));
             break;
         }
 
@@ -893,6 +940,12 @@ $g        = $global;
 <?php if ($g['favicon']): ?>
 <link rel="icon" href="<?= h($g['favicon']) ?>">
 <?php endif ?>
+<?php if (array_filter($cfg['items'], fn($i) => $i['terminal'])):
+    $xb = rtrim($g['xterm_base'], '/') . '/'; ?>
+<link rel="stylesheet" href="<?= h($xb . XTERM_ASSETS['css'][0]) ?>" integrity="<?= h(XTERM_ASSETS['css'][1]) ?>" crossorigin="anonymous">
+<script src="<?= h($xb . XTERM_ASSETS['js'][0]) ?>" integrity="<?= h(XTERM_ASSETS['js'][1]) ?>" crossorigin="anonymous"></script>
+<script src="<?= h($xb . XTERM_ASSETS['fit'][0]) ?>" integrity="<?= h(XTERM_ASSETS['fit'][1]) ?>" crossorigin="anonymous"></script>
+<?php endif ?>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1125,6 +1178,18 @@ html, body {
     display: none;
 }
 #btn-cancel    { background: var(--cancel); }
+#btn-rerun {
+    background: var(--btn);
+    color: var(--btn-text);
+    border: none;
+    padding: 6px 18px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    display: none;
+}
+#btn-rerun:hover { filter: brightness(1.15); }
 #btn-ttyd-kill { background: #6e40c9; }
 #btn-cancel:hover, #btn-ttyd-kill:hover { filter: brightness(1.15); }
 
@@ -1167,7 +1232,7 @@ html, body {
     display: block;
 }
 
-#output {
+.output-pane {
     flex: 1;
     overflow-y: auto;
     background: var(--out-bg);
@@ -1180,9 +1245,19 @@ html, body {
     word-break: break-all;
 }
 
-#output .line-stderr        { color: #ff7b72; }
-#output .line-command-label { color: #bf5af2; }
-#output .line-command-text  { color: #ffffff; font-weight: 600; }
+/* One pane per command item; each keeps its last run's output */
+.output-pane .line-stderr        { color: #ff7b72; }
+.output-pane .line-command-label { color: #bf5af2; }
+.output-pane .line-command-text  { color: #ffffff; font-weight: 600; }
+
+/* Terminal items: read-only xterm.js view of a pty stream */
+.term-pane {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--out-bg);
+    padding: 10px 4px 6px 12px;
+}
 
 /* ── Stats bar ── */
 #stats {
@@ -1664,6 +1739,7 @@ if ($groupOpen) echo "</div></div>\n";
     <div id="toolbar">
       <span id="toolbar-title" style="color:var(--text-muted)">Select an item from the menu</span>
       <span id="toolbar-desc"></span>
+      <button id="btn-rerun"></button>
       <button id="btn-cancel">&#9632; CANCEL</button>
       <button id="btn-ttyd-kill">&#9632; KILL SESSION</button>
     </div>
@@ -1674,7 +1750,7 @@ if ($groupOpen) echo "</div></div>\n";
         <div class="welcome-title"><?= h($g['title']) ?></div>
         <div class="welcome-sub">Select a function from the left menu to get started.</div>
       </div>
-      <div id="output" style="display:none"></div>
+      <!-- per-item .output-pane / .term-pane elements are added here by JS -->
     </div>
 
     <!-- Embedded URL pane -->
@@ -1728,6 +1804,7 @@ const ITEMS = <?= js(array_map(function($i) {
         'execute_text' => $i['execute_text'],
         'showfiles'    => $i['showfiles'],
         'ttyd'         => $i['ttyd'],
+        'terminal'     => $i['terminal'],
     ];
 }, $cfg['items'])) ?>;
 
@@ -1739,12 +1816,15 @@ let activeToken  = null;
 let activeItem   = null;
 let eventSource  = null;
 const ttydSessions = {};  // item.name → { proxyUrl, pidToken }
+// Last result per command item: item.name → { el, mode: 'plain'|'term', term, fit, done, files, filesToken }
+// Revisiting an item shows its pane instead of re-running the command.
+const panes      = {};
+let runPane      = null;   // pane receiving the current run's output
 
 // ── Element refs ──
 const $menu          = document.getElementById('menu');
 const $toolbar       = document.getElementById('toolbar-title');
 const $toolDesc      = document.getElementById('toolbar-desc');
-const $output        = document.getElementById('output');
 const $outputWrap    = document.getElementById('output-wrap');
 const $embed         = document.getElementById('embed');
 const $welcome       = document.getElementById('welcome');
@@ -1753,6 +1833,7 @@ const $filesSection  = document.getElementById('files-section');
 const $fileList      = document.getElementById('file-list');
 const $ttydPool      = document.getElementById('ttyd-pool');
 const $btnCancel     = document.getElementById('btn-cancel');
+const $btnRerun      = document.getElementById('btn-rerun');
 const $btnTtydKill   = document.getElementById('btn-ttyd-kill');
 const $btnClean      = document.getElementById('btn-clean');
 const $overlay       = document.getElementById('overlay');
@@ -2037,6 +2118,7 @@ function openItem(item) {
     $toolbar.style.color  = 'var(--text)';
     $toolDesc.textContent = item.description || '';
     $btnTtydKill.style.display = 'none';
+    updateRerunBtn();
 
     if (item.url) {
         showEmbed(item.url);
@@ -2070,12 +2152,28 @@ function openItem(item) {
     $embed.innerHTML          = '';
     $outputWrap.style.display = '';
 
+    // Previously run — show its last result; RUN AGAIN in the toolbar re-runs it
+    if (panes[item.name]) {
+        showPane(panes[item.name]);
+        return;
+    }
+
+    showPane(null);
+    runItem(item);
+}
+
+// Run an item: straight away if it takes no inputs, otherwise via the input modal
+function runItem(item) {
     if (Object.keys(item.inputs || {}).length === 0) {
         startExec(item, {});
     } else {
         openModalFor(item);
     }
 }
+
+$btnRerun.addEventListener('click', () => {
+    if (!running && activeItem) runItem(activeItem);
+});
 
 function openModalFor(item) {
     $modalTitle.textContent = item.title;
@@ -2195,13 +2293,15 @@ document.addEventListener('keydown', e => {
 
 // ── Start execution ──
 async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
-    $welcome.style.display = 'none';
-    $output.style.display  = 'block';
-    $output.innerHTML      = '';
-    $stats.style.display   = 'none';
-    $stats.innerHTML       = '';
-    $filesSection.style.display = 'none';
-    $fileList.innerHTML    = '';
+    const xtermMissing = item.terminal && typeof Terminal === 'undefined';
+    const pane = createPane(item, item.terminal && !xtermMissing ? 'term' : 'plain');
+    runPane = pane;
+    showPane(pane);
+    if (xtermMissing) {
+        appendOutput('[clido error] xterm.js failed to load — check xterm_base in clido.ini and browser console.', 'stderr');
+        return;
+    }
+    if (pane.mode === 'term') initTerm(pane);
 
     setRunning(true);
 
@@ -2254,21 +2354,30 @@ async function startExec(item, inputs, fileRefs = {}, formFileInputs = null) {
 
     const params = new URLSearchParams({ action: 'stream', token, item: item.name });
     for (const [k, v] of Object.entries(inputs)) params.set(k, v);
+    if (pane.term) { params.set('cols', pane.term.cols); params.set('rows', pane.term.rows); }
 
     eventSource = new EventSource(location.pathname + '?' + params.toString());
 
+    // Output arrives base64-encoded; stdout and stderr each get a stateful decoder
+    const decOut = plainDecoder();
+    const decErr = plainDecoder();
     eventSource.addEventListener('command', e => { appendCommand(e.data); });
-    eventSource.addEventListener('output',  e => { appendOutput(e.data, 'stdout'); });
-    eventSource.addEventListener('stderr',  e => { appendOutput(e.data, 'stderr'); });
+    eventSource.addEventListener('output',  e => { appendOutput(decOut(e.data), 'stdout'); });
+    eventSource.addEventListener('stderr',  e => { appendOutput(decErr(e.data), 'stderr'); });
+    eventSource.addEventListener('term',    e => { pane.term.write(b64ToBytes(e.data)); });
 
     eventSource.addEventListener('done', e => {
         eventSource.close();
         eventSource = null;
         const d = JSON.parse(e.data);
-        showStats(d);
-        if (d.showfiles && d.files && d.files.length > 0) showFiles(d.files, d.token);
+        pane.done = d;
+        if (d.showfiles && d.files && d.files.length > 0) {
+            pane.files      = d.files;
+            pane.filesToken = d.token;
+        }
         setRunning(false);
         activeToken = null;
+        if (panes[activeItem?.name] === pane) { renderStats(pane); renderFiles(pane); }
     });
 
     eventSource.addEventListener('error', e => {
@@ -2351,10 +2460,8 @@ $btnTtydKill.addEventListener('click', () => {
     if (deadFrame) deadFrame.remove();
     hideTtydPool();
     $outputWrap.style.display   = '';
+    showPane(null);
     $welcome.style.display      = '';
-    $output.style.display       = 'none';
-    $output.innerHTML           = '';
-    $stats.style.display        = 'none';
     $btnTtydKill.style.display  = 'none';
 
     const fd = csrfFd();
@@ -2398,6 +2505,9 @@ $btnClean.addEventListener('click', async () => {
     fd.append('action', 'clean');
     fd.append('token',  tok);
     await fetch(location.pathname, { method: 'POST', body: fd });
+    for (const p of Object.values(panes)) {
+        if (p.filesToken === tok) { p.files = null; p.filesToken = null; }
+    }
     $filesSection.style.display = 'none';
     $fileList.innerHTML = '';
 });
@@ -2407,9 +2517,109 @@ function setRunning(yes) {
     running = yes;
     document.querySelectorAll('.menu-item').forEach(b => b.disabled = yes);
     $btnCancel.style.display = yes ? 'inline-block' : 'none';
+    updateRerunBtn();
+}
+
+// Toolbar run button for command items: "RUN AGAIN" once a result exists, otherwise
+// the item's execute label (e.g. after closing the input modal without running)
+function updateRerunBtn() {
+    const show = !running && activeItem && !activeItem.url && !activeItem.ttyd;
+    $btnRerun.style.display = show ? 'inline-block' : 'none';
+    if (show) {
+        $btnRerun.textContent = panes[activeItem.name]
+            ? '↻ RUN AGAIN'
+            : '▶ ' + (activeItem.execute_text || 'EXECUTE');
+    }
+}
+
+// ── Per-item result panes ──
+function createPane(item, mode) {
+    const old = panes[item.name];
+    if (old) { old.term?.dispose(); old.el.remove(); }
+    const el = document.createElement('div');
+    el.className = mode === 'term' ? 'term-pane' : 'output-pane';
+    el.style.display = 'none';
+    $outputWrap.appendChild(el);
+    const pane = { el, mode, term: null, fit: null, done: null, files: null, filesToken: null };
+    panes[item.name] = pane;
+    return pane;
+}
+
+// Show one pane (or none) plus its stats bar and file list
+function showPane(pane) {
+    $welcome.style.display = 'none';
+    for (const p of Object.values(panes)) p.el.style.display = p === pane ? 'block' : 'none';
+    if (pane?.term && !running) fitPane(pane);   // browser may have resized while hidden
+    renderStats(pane);
+    renderFiles(pane);
+}
+
+window.addEventListener('resize', () => {
+    // The pty size is fixed when a command starts, so only refit while idle
+    const p = activeItem && panes[activeItem.name];
+    if (p?.term && !running && p.el.style.display !== 'none') fitPane(p);
+});
+
+// ── Terminal items (xterm.js) ──
+function initTerm(pane) {
+    const css = getComputedStyle(document.documentElement);
+    pane.term = new Terminal({
+        disableStdin:        true,   // output only — no keyboard input reaches the command
+        convertEol:          false,  // the pty already emits CRLF
+        cursorBlink:         false,
+        cursorInactiveStyle: 'none',
+        scrollback:          10000,
+        fontFamily:          "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+        fontSize:            13,
+        theme: {
+            background: css.getPropertyValue('--out-bg').trim(),
+            foreground: css.getPropertyValue('--out-text').trim(),
+        },
+    });
+    pane.fit = new FitAddon.FitAddon();
+    pane.term.loadAddon(pane.fit);
+    pane.term.open(pane.el);   // pane must be visible so xterm can measure it
+    fitPane(pane);
+}
+
+function fitPane(pane) {
+    try { pane.fit.fit(); } catch (_) {}
+}
+
+function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;   // xterm decodes UTF-8 statefully across chunks
+}
+
+// Plain items: base64 chunks → text. Multi-byte characters split across chunks are
+// reassembled; a bare CR (progress bars) becomes a newline so nothing is lost or
+// run together — use terminal = true for items that redraw lines properly.
+function plainDecoder() {
+    const dec = new TextDecoder();
+    let pendingCR = false;
+    return b64 => {
+        let t = dec.decode(b64ToBytes(b64), { stream: true });
+        if (pendingCR) t = '\r' + t;
+        pendingCR = t.endsWith('\r');   // might be the first half of a CRLF
+        if (pendingCR) t = t.slice(0, -1);
+        return t.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    };
+}
+
+// Write a clido status line into a terminal pane on its own line
+function termNotice(term, text, sgr) {
+    const msg = String(text).replace(/^\n+|\n+$/g, '').replace(/\r?\n/g, '\r\n');
+    const nl  = term.buffer.active.cursorX > 0 ? '\r\n' : '';
+    term.write(nl + sgr + msg + '\x1b[0m\r\n');
 }
 
 function appendCommand(cmd) {
+    if (runPane.term) {
+        termNotice(runPane.term, '\x1b[38;5;135mExecuting: \x1b[1;97m' + cmd, '');
+        return;
+    }
     const wrap  = document.createElement('span');
     const label = document.createElement('span');
     const text  = document.createElement('span');
@@ -2419,19 +2629,27 @@ function appendCommand(cmd) {
     text.textContent  = cmd + '\n';
     wrap.appendChild(label);
     wrap.appendChild(text);
-    $output.appendChild(wrap);
-    $output.scrollTop = $output.scrollHeight;
+    runPane.el.appendChild(wrap);
+    runPane.el.scrollTop = runPane.el.scrollHeight;
 }
 
 function appendOutput(text, type) {
+    if (!text) return;
+    if (runPane.term) {
+        // stdout here only comes from plain items; stderr is the wrapper's own errors
+        termNotice(runPane.term, text, type === 'stderr' ? '\x1b[38;2;255;123;114m' : '');
+        return;
+    }
     const span = document.createElement('span');
     span.textContent = text;
     if (type === 'stderr') span.className = 'line-stderr';
-    $output.appendChild(span);
-    $output.scrollTop = $output.scrollHeight;
+    runPane.el.appendChild(span);
+    runPane.el.scrollTop = runPane.el.scrollHeight;
 }
 
-function showStats(d) {
+function renderStats(pane) {
+    const d = pane?.done;
+    if (!d) { $stats.style.display = 'none'; $stats.innerHTML = ''; return; }
     $stats.style.display = 'flex';
     let html = '';
     if (d.timed_out) {
@@ -2445,7 +2663,13 @@ function showStats(d) {
     $stats.innerHTML = html;
 }
 
-function showFiles(files, token) {
+function renderFiles(pane) {
+    if (!pane?.files?.length) {
+        $filesSection.style.display = 'none';
+        $fileList.innerHTML = '';
+        return;
+    }
+    const files = pane.files, token = pane.filesToken;
     $filesSection.style.display = 'block';
     $fileList.innerHTML = '';
     $btnClean.dataset.token = token;

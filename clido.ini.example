@@ -40,6 +40,9 @@ sigkill_wait  = 5
 ; ttyd_port_max = 7699
 ; ttyd_bin      = ttyd   ; full path if ttyd is not on the web server's PATH
 
+; terminal items — where the browser loads xterm.js from (mirror the pinned files to self-host; see README)
+; xterm_base    = https://cdn.jsdelivr.net/npm
+
 ; Dark-mode color palette — all values are CSS colors
 ; color_bg          = #0d1117
 ; color_sidebar     = #161b22
@@ -148,6 +151,16 @@ max_runtime   = 300
 
 [group: Terminal Tools]
 title = Terminal Tools
+
+; terminal items run the command under a pseudo-terminal and render its output with
+; xterm.js — colors, progress bars and full-screen redraws work, but there is no keyboard
+; input. No extra daemon, port or proxy is needed. Use these for output-only commands.
+
+[item: top_snapshot]
+title         = Top (10 refreshes)
+description   = Live process view that exits after 10 refreshes
+command       = /usr/bin/top -d 1 -n 10
+terminal      = true
 
 ; ttyd items open a full interactive terminal in the right pane using ttyd.
 ; Requires ttyd installed (apt install ttyd) and nginx/Apache configured to proxy

@@ -26,6 +26,7 @@ Clone once, deploy many times via symlinks. Each deployment reads its own `clido
 - [simplewebauth](https://github.com/sysmatt/simplewebauth) for session authentication — optional; omit `simplewebauth` in `[global]` to run without auth (local/trusted-network deployments only)
 - Web server with PHP-FPM (Apache or nginx); output buffering must be disabled for SSE streaming
 - [ttyd](https://github.com/tsl0922/ttyd) (`apt install ttyd`) — only needed if you use `ttyd = true` items
+- `script` and `setsid` from util-linux (installed by default on Linux) — only needed if you use `terminal = true` items. The browser loads [xterm.js](https://xtermjs.org/) from a CDN for these items (see `xterm_base`)
 
 ## Setup
 
@@ -121,6 +122,7 @@ INI key names are **case-insensitive** — `arg1`, `ARG1`, and `Arg1` are identi
 | `ttyd_port_min` | `7681` | First port in the range reserved for ttyd terminal sessions |
 | `ttyd_port_max` | `7699` | Last port in the range (supports up to `max−min+1` concurrent sessions) |
 | `ttyd_bin` | `ttyd` | Path to the ttyd binary; set if ttyd is not on the web server's `PATH` |
+| `xterm_base` | `https://cdn.jsdelivr.net/npm` | Where the browser loads xterm.js for `terminal = true` items. To self-host, mirror the pinned files at the same relative paths (`@xterm/xterm@6.0.0/lib/xterm.js`, `@xterm/xterm@6.0.0/css/xterm.css`, `@xterm/addon-fit@0.11.0/lib/addon-fit.js`). They are loaded with SRI hashes, so they must be byte-identical |
 
 ### [group: NAME]
 
@@ -163,6 +165,7 @@ execute_text = RUN BACKUP
 | `show_command` | Override global `show_command` for this item |
 | `max_runtime` | Override global `max_runtime` for this item |
 | `showfiles` | `true` to list and offer download of files created in the temp dir |
+| `terminal` | `true` to run the command under a pseudo-terminal and render its output with xterm.js (colors, progress bars, full-screen redraws). Output only — see [Terminal items](#terminal-items) |
 | `ttyd` | `true` to open the command in a full interactive terminal via ttyd instead of the SSE output pane |
 | `arg1`…`argN` | Fixed argument in this position |
 | `input1`…`inputN` | User-supplied argument; value = input type (see below) |
@@ -243,6 +246,31 @@ desc1  = Input files
 ; → script.sh --input 'a.txt' --input 'b.txt'
 ```
 
+#### Terminal items
+
+Commands that change their output when attached to a terminal (colors, progress bars, `\r` spinners, cursor movement, full-screen tools like `top`) can set `terminal = true`. clido runs them under a pseudo-terminal using util-linux `script` and sends the raw byte stream (base64-encoded over the existing SSE connection) to a read-only [xterm.js](https://xtermjs.org/) view in the output pane.
+
+```ini
+[item: apt_upgrade]
+title    = Upgrade packages
+command  = /usr/bin/apt-get -y upgrade
+terminal = true
+```
+
+| | `terminal = true` | `ttyd = true` |
+|---|---|---|
+| Rendering | xterm.js | xterm.js (inside ttyd) |
+| Keyboard input | no | yes |
+| Extra server process / port / proxy | none | ttyd per session, port pool, WebSocket proxy |
+| Cancel, `max_runtime`, `show_command`, `showfiles`, history | yes | no |
+
+Notes:
+
+- The terminal is sized to fit the output pane when the command starts (`stty cols/rows`). Resizing the browser mid-run does not resize the running command.
+- `TERM=xterm-256color`, `COLORTERM=truecolor` and `PAGER=cat` are set. stdout and stderr share the terminal, so stderr is not shown in red.
+- There is no keyboard input. A command that waits for a keypress or prompt runs until it is cancelled or hits `max_runtime`.
+- Wrappers that move the command out of the terminal's foreground process group stop full-screen tools (SIGTTOU), so use `timeout --foreground` rather than plain `timeout`.
+
 ### [item: NAME] — URL embed items
 
 URL items embed a website in the right pane instead of running a command. A small pop-out icon (↗) appears on hover in the menu to open the URL in a new tab instead.
@@ -267,8 +295,9 @@ url         = https://portainer.internal:9000
 - **Left pane**: scrollable menu of collapsible groups and items; click a group header to toggle it; URL items show a `↗` pop-out icon on hover to open in a new tab
 - **Right pane**: live command output with a terminal-style monospace display, or an embedded site for URL items
 - **Input modal**: appears for command items with any `inputN` defined; shows input fields (text, checkbox, radio, select, or file upload drop zones), the execute button, and a "Previous runs" history table with per-row re-run, pre-fill, and delete buttons
-- **While running**: all menu items are disabled; a Cancel button is shown (sends SIGTERM, then SIGKILL after `sigkill_wait` seconds)
+- **While running**: all menu items are disabled; a Cancel button is shown (sends SIGTERM, then SIGKILL after `sigkill_wait` seconds, to the command's whole process group). If the browser tab is closed, the command is killed the same way within a few seconds
 - **After completion**: exit code, elapsed time, and (if `showfiles = true`) a file listing with sizes and timestamps and a download link per file; a Clean button deletes the temp directory
+- **Last result per item**: each command item keeps its last output, exit status and file list for the life of the page. Returning to an item shows that result instead of re-running it; the toolbar's **↻ RUN AGAIN** button runs it again (via the input modal if the item has inputs)
 
 ## Authentication
 
