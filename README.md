@@ -66,7 +66,8 @@ If you use **ttyd terminal items**, add a second nginx location to proxy WebSock
 # Port alternation MUST match ttyd_port_min..ttyd_port_max (default 7681-7699).
 # Never use a bare \d+ here: it turns this block into a proxy to every service
 # listening on localhost.
-location ~ ^/ttyd/(?<ttyd_port>768[1-9]|769[0-9])/[0-9a-f]{32}/ {
+# The regex must be quoted: nginx parses an unquoted "{32}" as a block delimiter.
+location ~ "^/ttyd/(?<ttyd_port>768[1-9]|769[0-9])/[0-9a-f]{32}/" {
     auth_request /simplewebauth/auth_check.php;   # require a logged-in session
 
     proxy_pass http://127.0.0.1:$ttyd_port;       # no URI part: forwards the original path
