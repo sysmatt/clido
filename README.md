@@ -63,17 +63,34 @@ location ~ \.php$ {
 If you use **ttyd terminal items**, add a second nginx location to proxy WebSocket traffic through the same 443 connection. The port number is embedded in the URL path so one location block handles the whole pool:
 
 ```nginx
-location ~ ^/ttyd/(?<ttyd_port>\d+)/ {
-    proxy_pass http://127.0.0.1:$ttyd_port/;
+# Port alternation MUST match ttyd_port_min..ttyd_port_max (default 7681-7699).
+# Never use a bare \d+ here: it turns this block into a proxy to every service
+# listening on localhost.
+location ~ ^/ttyd/(?<ttyd_port>768[1-9]|769[0-9])/[0-9a-f]{32}/ {
+    auth_request /simplewebauth/auth_check.php;   # require a logged-in session
+
+    proxy_pass http://127.0.0.1:$ttyd_port;       # no URI part: forwards the original path
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
     proxy_read_timeout 3600;
 }
+
+# Session check used by auth_request above — internal only, never reachable directly.
+location = /simplewebauth/auth_check.php {
+    internal;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME $document_root/simplewebauth/auth_check.php;
+    fastcgi_pass unix:/run/php/php-fpm.sock;
+    fastcgi_pass_request_body off;
+    fastcgi_param CONTENT_LENGTH "";
+}
 ```
 
-The ttyd processes listen only on `127.0.0.1` and are never publicly exposed. A 32-character random token embedded in the URL path acts as the per-session auth secret.
+Adjust the `auth_request` path if simplewebauth lives elsewhere. If you change `ttyd_port_min`/`ttyd_port_max`, update the port alternation to match. Keep `proxy_pass` free of any URI part (no trailing `/`): with a variable in it, nginx would replace the request path with that URI, but ttyd's `--base-path` expects the full `/ttyd/<port>/<token>/` path.
+
+ttyd is started with `--interface 127.0.0.1`, so it is never reachable except through this proxy, and with `--once`, so each terminal accepts exactly one client and exits when that client disconnects. Reloading the page ends any open terminals; start them again from the menu. Access requires both a valid simplewebauth session and the 32-character random token in the URL path.
 
 **Apache** — add to your VirtualHost or `.htaccess`:
 

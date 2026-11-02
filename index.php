@@ -718,6 +718,14 @@ function ttyd_pid_file(string $token): string {
     return sys_get_temp_dir() . "/clido_ttyd_pid_$token";
 }
 
+// With --once, ttyd usually exits on its own and leaves its pid file behind. Before
+// signalling, confirm the pid still belongs to the ttyd we started (its --base-path
+// carries the token) — otherwise a recycled pid could kill an unrelated process.
+function ttyd_pid_matches(int $pid, string $token): bool {
+    $cmdline = @file_get_contents("/proc/$pid/cmdline");
+    return $cmdline !== false && str_contains($cmdline, "/$token/");
+}
+
 function ttyd_find_free_port(int $min, int $max): int|false {
     for ($port = $min; $port <= $max; $port++) {
         $sock = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.1);
@@ -774,9 +782,15 @@ function action_ttyd_start(array $cfg): void {
     // stays at default so ttyd can actually signal children when the client disconnects.
     // nohup would set SIG_IGN which propagates through fork+exec and orphans processes.
     // </dev/null: clean stdin, not the FPM worker's FastCGI socket.
+    // --interface 127.0.0.1: ttyd binds ALL interfaces by default, which would expose
+    //   the writable terminal directly on the network, bypassing nginx, TLS and auth.
+    // --once: accept a single client and exit when it disconnects — a leaked URL can't
+    //   attach a second viewer, and closing the tab can't leave a live shell behind.
     $ttydCmd = 'setsid ' . $ttydBin
+        . ' --interface 127.0.0.1'
         . ' --port ' . (int)$port
         . ' --base-path ' . escapeshellarg($basePath)
+        . ' --once'
         . ' --writable'
         . ' ' . $cmdForShell
         . ($args ? ' ' . implode(' ', $args) : '')
@@ -843,7 +857,7 @@ function action_ttyd_kill(array $cfg): void {
     }
 
     $pid = (int)file_get_contents($pidFile);
-    if ($pid > 0) posix_kill($pid, SIGTERM);
+    if ($pid > 0 && ttyd_pid_matches($pid, $token)) posix_kill($pid, SIGTERM);
     @unlink($pidFile);
 
     $authUser = function_exists('auth_user') ? auth_user() : 'anonymous';
